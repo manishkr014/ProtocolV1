@@ -55,10 +55,15 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
         case 2:  // EXT_HDR (both encrypted and unencrypted)
             parser->header_buf[parser->bytes_received++] = byte;
             
-            // Extended header: bytes 4-7 are sequence, sys_id, comp_id, msg_id
-            // Extract message ID at byte 7 (0-indexed position in header_buf)
-            if (parser->bytes_received == 7) {
-                parser->msg_id = byte;  // Message ID is at byte 7
+            // Extended header: 
+            // Bytes 4-5: sequence (upper 10 bits) + sys_id (6 bits)
+            // Bytes 6-7: comp_id (4 bits) + msg_id (12 bits)
+            
+            // Extract message ID after reading bytes 6-7 (comp_msg)
+            if (parser->bytes_received == 8) {
+                // comp_msg is in header_buf[6] (high) and header_buf[7] (low)
+                uint16_t comp_msg = (parser->header_buf[6] << 8) | parser->header_buf[7];
+                parser->msg_id = comp_msg & 0xFFF;  // Lower 12 bits are msg_id
             }
             
             // Check if encrypted to determine extended header length

@@ -216,12 +216,12 @@ int main(void) {
             continue;
         }
         
-        // Validate packet size (UAVLink: 10-512 bytes for typical messages)
-        if (recv_len < 10 || recv_len > 512) {
-            continue;  // Reject: too small or suspiciously large
+        // Validate packet size (UAVLink: 10 bytes minimum, 4122 max with large payloads)
+        if (recv_len < 10) {
+            continue;  // Reject: too small
         }
         
-        //Validate Start of Frame marker
+        // Validate Start of Frame marker
         if (recv_buffer[0] != 0xA5) {
             continue;  // Not a UAVLink packet
         }
