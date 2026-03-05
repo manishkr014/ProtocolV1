@@ -120,6 +120,11 @@ typedef struct
     // Extracted payload fields
     ul_header_t header;
     uint8_t payload[512]; // Must match buffer[512] to prevent overflow
+
+    /* Replay protection: 32-packet sliding window keyed on sequence number */
+    uint8_t  replay_init;         /* 1 once first valid packet received */
+    uint8_t  last_seq;            /* Highest accepted sequence number    */
+    uint32_t replay_window;       /* Bitmap: bit i set => (last_seq - i) seen */
 } ul_parser_t;
 
 /* --- Nonce State Management (for secure encryption) --- */
@@ -295,6 +300,14 @@ int uavlink_pack_selective(uint8_t *buf, const ul_header_t *h, const uint8_t *pa
 int uavlink_pack_batch(uint8_t *buf, const ul_batch_t *batch,
                        const uint8_t *key_32b, ul_nonce_state_t *nonce_state,
                        uint8_t priority);
+
+/* Deserialize a received batch payload into a ul_batch_t structure.
+   @param payload     Decrypted/decrypted batch payload bytes
+   @param payload_len Number of bytes in payload
+   @param batch_out   Output structure (caller-allocated)
+   @return 0 on success, negative on malformed input */
+int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
+                         ul_batch_t *batch_out);
 
 /* Get encryption policy for a message ID */
 ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id);

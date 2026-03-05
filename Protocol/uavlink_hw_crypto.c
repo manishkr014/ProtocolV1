@@ -24,7 +24,8 @@ static bool g_hw_crypto_enabled = false;
 #if UL_HW_NEON_AVAILABLE
 
 void ul_chacha20_neon(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len)
+                      const uint8_t *input, uint8_t *output, size_t len,
+                      uint32_t initial_counter)
 {
     // ChaCha20 state initialization
     uint32_t state[16];
@@ -38,8 +39,8 @@ void ul_chacha20_neon(const uint8_t key[32], const uint8_t nonce[8],
     // Key (8 words = 32 bytes)
     memcpy(&state[4], key, 32);
 
-    // Counter starts at 0
-    state[12] = 0;
+    // Counter starts at initial_counter (0 for Poly1305 key gen, 1 for encryption)
+    state[12] = initial_counter;
 
     // Nonce (2 words = 8 bytes)
     memcpy(&state[13], nonce, 8);
@@ -146,12 +147,13 @@ void ul_chacha20_poly1305_encrypt_neon(const uint8_t key[32], const uint8_t nonc
                                        const uint8_t *plaintext, size_t plaintext_len,
                                        uint8_t *ciphertext, uint8_t mac[16])
 {
-    // Use NEON-accelerated ChaCha20
-    ul_chacha20_neon(key, nonce, plaintext, ciphertext, plaintext_len);
+    // Use NEON-accelerated ChaCha20.
+    // RFC 8439: encryption starts at counter=1 so it doesn't reuse the
+    // keystream block used for Poly1305 key generation (counter=0).
+    ul_chacha20_neon(key, nonce, plaintext, ciphertext, plaintext_len, 1);
 
-    // Generate Poly1305 key using ChaCha20 block 0 with the ACTUAL message nonce.
-    // Using a zero nonce here would produce the same MAC key for every message,
-    // allowing MAC forgery across messages. Must use the same nonce as encryption.
+    // Generate Poly1305 key: ChaCha20 block counter=0 with message nonce.
+    // Only the first 32 bytes of the 64-byte block are used as the key.
     uint8_t poly_key[32] = {0};
     ul_chacha20_neon(key, nonce, poly_key, poly_key, 32);
 
@@ -168,11 +170,10 @@ int ul_chacha20_poly1305_decrypt_neon(const uint8_t key[32], const uint8_t nonce
                                       const uint8_t *ciphertext, size_t ciphertext_len,
                                       const uint8_t mac[16], uint8_t *plaintext)
 {
-    // Verify MAC first — use the ACTUAL message nonce for Poly1305 key derivation,
-    // matching what the encryptor used. A zero nonce here would accept MACs computed
-    // with a different key, enabling MAC forgery.
+    // Verify MAC first — generate Poly1305 key from counter=0 block.
+    // Use counter=0 (not 1) to match the encryptor's key derivation step.
     uint8_t poly_key[32] = {0};
-    ul_chacha20_neon(key, nonce, poly_key, poly_key, 32);
+    ul_chacha20_neon(key, nonce, poly_key, poly_key, 32, 0);
 
     crypto_poly1305_ctx ctx;
     crypto_poly1305_init(&ctx, poly_key);
@@ -189,8 +190,8 @@ int ul_chacha20_poly1305_decrypt_neon(const uint8_t key[32], const uint8_t nonce
         return -1; // MAC verification failed
     }
 
-    // MAC valid, decrypt
-    ul_chacha20_neon(key, nonce, ciphertext, plaintext, ciphertext_len);
+    // MAC valid — decrypt starting at counter=1 (matching the encryptor)
+    ul_chacha20_neon(key, nonce, ciphertext, plaintext, ciphertext_len, 1);
     return 0;
 }
 

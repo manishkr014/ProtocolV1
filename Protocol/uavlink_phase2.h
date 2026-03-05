@@ -44,6 +44,7 @@ typedef struct
     uint8_t *output_payload;  // User-provided output buffer
 
     uint16_t msg_id;         // Current message ID (12-bit field)
+    uint8_t stream_type;     // 4-bit stream type (cmd/cmd_ack needs extra target byte)
     uint8_t cipher_nonce[8]; // Nonce for decryption
     uint8_t cipher_tag[16];  // Authentication tag
     uint8_t *last_payload;   // Pointer to completed payload (valid after result==1)

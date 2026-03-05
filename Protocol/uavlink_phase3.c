@@ -262,30 +262,30 @@ int ul_fec_decode(ul_fec_decoder_t *decoder, uint8_t *output)
 
         if (parity_available)
         {
-            // Reconstruct: missing = parity XOR all_other_data_shards
-            // Write into the output position for missing_index
-            uint8_t *dest = output + (missing_index * shard_size);
-            memcpy(dest, decoder->shards[parity_idx], shard_size);
+            // Reconstruct the missing shard into a temporary buffer first,
+            // then write ALL shards to their correct sequential positions.
+            // Using a temp buffer avoids any overlap between the XOR writes
+            // and the sequential copy that fills the output.
+            uint8_t temp_shard[256]; // shard_size <= 255 (uint8_t field)
+            memcpy(temp_shard, decoder->shards[parity_idx], shard_size);
             for (uint8_t i = 0; i < decoder->params.data_shards; i++)
             {
                 if (i != missing_index && decoder->shard_present[i] && decoder->shards[i])
                 {
                     for (size_t b = 0; b < shard_size; b++)
-                        dest[b] ^= decoder->shards[i][b];
+                        temp_shard[b] ^= decoder->shards[i][b];
                 }
             }
-            // Now write all data shards in order
+
+            // Now copy every shard (including reconstructed) to its output slot.
+            // Each shard i belongs at output[i * shard_size].
             for (uint8_t i = 0; i < decoder->params.data_shards; i++)
             {
                 if (i == missing_index)
-                {
-                    total_size += shard_size; // Already written above
-                }
-                else
-                {
+                    memcpy(output + total_size, temp_shard, shard_size);
+                else if (decoder->shard_present[i] && decoder->shards[i])
                     memcpy(output + total_size, decoder->shards[i], shard_size);
-                    total_size += shard_size;
-                }
+                total_size += shard_size;
             }
             g_phase3_stats.fec_packets_recovered++;
             return (int)total_size;
@@ -350,13 +350,13 @@ int ul_delta_encode_gps(ul_delta_ctx_t *ctx, const ul_gps_raw_t *gps,
         if (lat_delta >= -32768 && lat_delta <= 32767)
         {
             output[pos++] = 0x01; // Small delta
-            output[pos++] = (lat_delta >> 8) & 0xFF;
-            output[pos++] = lat_delta & 0xFF;
+            output[pos++] = lat_delta & 0xFF;        // low byte first (little-endian)
+            output[pos++] = (lat_delta >> 8) & 0xFF; // high byte
         }
         else
         {
             output[pos++] = 0x02; // Large delta
-            memcpy(&output[pos], &lat_delta, 4);
+            memcpy(&output[pos], &lat_delta, 4);     // already native LE on all targets
             pos += 4;
         }
 
@@ -365,8 +365,8 @@ int ul_delta_encode_gps(ul_delta_ctx_t *ctx, const ul_gps_raw_t *gps,
         if (lon_delta >= -32768 && lon_delta <= 32767)
         {
             output[pos++] = 0x01;
-            output[pos++] = (lon_delta >> 8) & 0xFF;
             output[pos++] = lon_delta & 0xFF;
+            output[pos++] = (lon_delta >> 8) & 0xFF;
         }
         else
         {
@@ -380,8 +380,8 @@ int ul_delta_encode_gps(ul_delta_ctx_t *ctx, const ul_gps_raw_t *gps,
         if (alt_delta >= -32768 && alt_delta <= 32767)
         {
             output[pos++] = 0x01;
-            output[pos++] = (alt_delta >> 8) & 0xFF;
             output[pos++] = alt_delta & 0xFF;
+            output[pos++] = (alt_delta >> 8) & 0xFF;
         }
         else
         {
@@ -418,79 +418,96 @@ int ul_delta_decode_gps(ul_delta_ctx_t *ctx, const uint8_t *delta_data,
         return -1;
     }
 
+    // Bounds-check helper: verify we have at least `need` bytes remaining
+#define DELTA_CHECK(need) do { if (pos + (need) > delta_len) return -1; } while (0)
+
     size_t pos = 0;
+    DELTA_CHECK(1);
     uint8_t marker = delta_data[pos++];
 
     if (marker == 0x00)
     {
         // Full update
+        DELTA_CHECK(sizeof(ul_gps_raw_t));
         memcpy(gps, &delta_data[pos], sizeof(ul_gps_raw_t));
         ctx->prev_gps = *gps;
         ctx->has_previous = true;
     }
     else if (marker == 0x01)
     {
+        if (!ctx->has_previous)
+            return -1; // Cannot apply delta without a previous state
+
         // Delta update
         *gps = ctx->prev_gps; // Start with previous
 
-        // Decode lat delta
+        // Decode lat delta (little-endian int16 small, or 4-byte large)
+        DELTA_CHECK(1);
         uint8_t lat_type = delta_data[pos++];
         if (lat_type == 0x01)
         {
-            int16_t delta = (int16_t)((delta_data[pos] << 8) | delta_data[pos + 1]);
+            DELTA_CHECK(2);
+            int16_t delta = (int16_t)((uint16_t)delta_data[pos] | ((uint16_t)delta_data[pos + 1] << 8));
             gps->lat = ctx->prev_gps.lat + delta;
             pos += 2;
         }
-        else
+        else if (lat_type == 0x02)
         {
+            DELTA_CHECK(4);
             int32_t delta;
             memcpy(&delta, &delta_data[pos], 4);
             gps->lat = ctx->prev_gps.lat + delta;
             pos += 4;
         }
+        else { return -1; }
 
         // Decode lon delta
+        DELTA_CHECK(1);
         uint8_t lon_type = delta_data[pos++];
         if (lon_type == 0x01)
         {
-            int16_t delta = (int16_t)((delta_data[pos] << 8) | delta_data[pos + 1]);
+            DELTA_CHECK(2);
+            int16_t delta = (int16_t)((uint16_t)delta_data[pos] | ((uint16_t)delta_data[pos + 1] << 8));
             gps->lon = ctx->prev_gps.lon + delta;
             pos += 2;
         }
-        else
+        else if (lon_type == 0x02)
         {
+            DELTA_CHECK(4);
             int32_t delta;
             memcpy(&delta, &delta_data[pos], 4);
             gps->lon = ctx->prev_gps.lon + delta;
             pos += 4;
         }
+        else { return -1; }
 
         // Decode alt delta
+        DELTA_CHECK(1);
         uint8_t alt_type = delta_data[pos++];
         if (alt_type == 0x01)
         {
-            int16_t delta = (int16_t)((delta_data[pos] << 8) | delta_data[pos + 1]);
+            DELTA_CHECK(2);
+            int16_t delta = (int16_t)((uint16_t)delta_data[pos] | ((uint16_t)delta_data[pos + 1] << 8));
             gps->alt = ctx->prev_gps.alt + delta;
             pos += 2;
         }
-        else
+        else if (alt_type == 0x02)
         {
+            DELTA_CHECK(4);
             int32_t delta;
             memcpy(&delta, &delta_data[pos], 4);
             gps->alt = ctx->prev_gps.alt + delta;
             pos += 4;
         }
+        else { return -1; }
 
-        // Decode other fields
-        memcpy(&gps->eph, &delta_data[pos], 2);
-        pos += 2;
-        memcpy(&gps->epv, &delta_data[pos], 2);
-        pos += 2;
-        memcpy(&gps->vel, &delta_data[pos], 2);
-        pos += 2;
-        memcpy(&gps->cog, &delta_data[pos], 2);
-        pos += 2;
-        gps->fix_type = delta_data[pos++];
+        // Decode fixed-size fields
+        DELTA_CHECK(10); // 2+2+2+2+1+1 = 10 bytes
+        memcpy(&gps->eph, &delta_data[pos], 2); pos += 2;
+        memcpy(&gps->epv, &delta_data[pos], 2); pos += 2;
+        memcpy(&gps->vel, &delta_data[pos], 2); pos += 2;
+        memcpy(&gps->cog, &delta_data[pos], 2); pos += 2;
+        gps->fix_type   = delta_data[pos++];
         gps->satellites = delta_data[pos++];
 
         ctx->prev_gps = *gps;
@@ -500,6 +517,7 @@ int ul_delta_decode_gps(ul_delta_ctx_t *ctx, const uint8_t *delta_data,
         return -1; // Unknown marker
     }
 
+#undef DELTA_CHECK
     return 0;
 }
 

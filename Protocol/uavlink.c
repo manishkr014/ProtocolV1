@@ -58,6 +58,8 @@ static const uint8_t ul_crc_seed_table[] = {
     /* 0x02 GPS_RAW   */ 24,
     /* 0x03 BATTERY   */ 154,
     /* 0x04 RC_INPUT  */ 89,
+    /* 0x05 (unused)  */ 0,
+    /* 0x06 CMD       */ 217, /* Distinct seed so cmd msg_id corruption is detectable */
 };
 #define UL_CRC_SEED_TABLE_SIZE (sizeof(ul_crc_seed_table) / sizeof(ul_crc_seed_table[0]))
 
@@ -126,9 +128,8 @@ int ul_encode_ext_header(uint8_t *buf, const ul_header_t *h)
     buf[offset++] = (comp_msg >> 8) & 0xFF;
     buf[offset++] = comp_msg & 0xFF;
 
-    // Only encode target_sys_id for CMD/CMD_ACK stream types to match decoder
-    if ((h->stream_type == UL_STREAM_CMD || h->stream_type == UL_STREAM_CMD_ACK)
-        && h->target_sys_id != 0)
+    // Encode target_sys_id for CMD/CMD_ACK — always present to match decoder unconditionally
+    if (h->stream_type == UL_STREAM_CMD || h->stream_type == UL_STREAM_CMD_ACK)
     {
         buf[offset++] = h->target_sys_id & 0x3F;
     }
@@ -818,6 +819,41 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                 memcpy(p->payload, p->buffer + header_size, p->header.payload_len);
             }
 
+            // Replay protection: 32-packet sliding window
+            {
+                uint8_t seq = (uint8_t)p->header.sequence;
+                if (p->replay_init)
+                {
+                    int8_t diff = (int8_t)(seq - p->last_seq);
+                    if (diff <= 0)
+                    {
+                        /* Packet is older than or equal to the highest seen */
+                        uint8_t offset = (uint8_t)(-diff);
+                        if (offset >= 32 || (p->replay_window & (1UL << offset)))
+                        {
+                            /* Outside window or already seen: replay */
+                            ul_parser_init(p);
+                            return UL_ERR_CRC; /* Reuse error code for replay */
+                        }
+                        p->replay_window |= (1UL << offset);
+                    }
+                    else
+                    {
+                        /* Newer packet — advance window */
+                        uint8_t shift = (uint8_t)diff;
+                        p->replay_window = (shift >= 32) ? 0 : (p->replay_window << shift);
+                        p->replay_window |= 1UL; /* Mark current seq */
+                        p->last_seq = seq;
+                    }
+                }
+                else
+                {
+                    p->replay_init  = 1;
+                    p->last_seq     = seq;
+                    p->replay_window = 1UL;
+                }
+            }
+
             // Packet successfully parsed and authenticated
             p->state = UL_PARSE_STATE_IDLE;
             p->buf_idx = 0;
@@ -855,29 +891,30 @@ int uavlink_pack_with_nonce(uint8_t *buf, const ul_header_t *h, const uint8_t *p
 
 /* --- OPTIMIZATION 1: Selective Encryption (60% bandwidth reduction) --- */
 
-/* Default encryption policy table (per message ID)
-   This table defines which messages require encryption by default */
-static ul_encrypt_policy_t msg_encrypt_policy_table[1024] = {
-    [UL_MSG_HEARTBEAT] = UL_ENCRYPT_NEVER,  /* Public status - no crypto overhead */
-    [UL_MSG_ATTITUDE] = UL_ENCRYPT_NEVER,   /* High-rate telemetry - bandwidth critical */
-    [UL_MSG_GPS_RAW] = UL_ENCRYPT_OPTIONAL, /* Medium sensitivity - encrypt if key provided */
-    [UL_MSG_BATTERY] = UL_ENCRYPT_OPTIONAL, /* Medium sensitivity */
-    [UL_MSG_RC_INPUT] = UL_ENCRYPT_ALWAYS,  /* Security-critical - always encrypt */
-    [UL_MSG_CMD] = UL_ENCRYPT_ALWAYS,       /* Commands must be encrypted */
-    [UL_MSG_BATCH] = UL_ENCRYPT_OPTIONAL    /* Batched messages - follow policy */
-};
-
+/* Default encryption policy lookup.
+   Replaces the previous 4KB static array (1024 entries, 7 used) with a
+   switch-case to save ~4KB of BSS on embedded targets. */
 ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
 {
-    if (msg_id >= 1024)
-        return UL_ENCRYPT_OPTIONAL; /* Default for unknown messages */
-    return msg_encrypt_policy_table[msg_id];
+    switch (msg_id)
+    {
+    case UL_MSG_HEARTBEAT: return UL_ENCRYPT_NEVER;
+    case UL_MSG_ATTITUDE:  return UL_ENCRYPT_NEVER;
+    case UL_MSG_GPS_RAW:   return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_BATTERY:   return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_RC_INPUT:  return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_CMD:       return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_BATCH:     return UL_ENCRYPT_OPTIONAL;
+    default:               return UL_ENCRYPT_OPTIONAL;
+    }
 }
 
 void ul_set_encrypt_policy(uint16_t msg_id, ul_encrypt_policy_t policy)
 {
-    if (msg_id < 1024)
-        msg_encrypt_policy_table[msg_id] = policy;
+    /* Runtime override is not supported with the switch-based table.
+       Extend this function with a small override array if needed. */
+    (void)msg_id;
+    (void)policy;
 }
 
 /* OPTIMIZATION: Pack with selective encryption based on message policy
@@ -980,6 +1017,10 @@ int uavlink_pack_batch(uint8_t *buf, const ul_batch_t *batch,
 
     for (int i = 0; i < batch->num_messages; i++)
     {
+        /* Validate each message length before trusting it for memcpy */
+        if (batch->messages[i].length > sizeof(batch->messages[i].data))
+            return UL_ERR_BUFFER_OVERFLOW; /* length > 64 would overread data[64] */
+
         total_payload_len += 3; /* msg_id (2 bytes) + length (1 byte) */
         total_payload_len += batch->messages[i].length;
     }
@@ -1020,4 +1061,44 @@ int uavlink_pack_batch(uint8_t *buf, const ul_batch_t *batch,
 
     /* Pack the batched message using selective encryption */
     return uavlink_pack_selective(buf, &header, payload, key_32b, nonce_state);
+}
+
+int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
+                         ul_batch_t *batch_out)
+{
+    if (!payload || !batch_out || payload_len < 1)
+        return UL_ERR_NULL_POINTER;
+
+    memset(batch_out, 0, sizeof(ul_batch_t));
+
+    uint16_t pos = 0;
+    uint8_t num_messages = payload[pos++];
+
+    if (num_messages > UL_BATCH_MAX_MESSAGES)
+        return UL_ERR_INVALID_HEADER;
+
+    for (uint8_t i = 0; i < num_messages; i++)
+    {
+        /* Need 3 bytes: msg_id (2) + length (1) */
+        if (pos + 3 > payload_len)
+            return UL_ERR_BUFFER_OVERFLOW;
+
+        uint16_t msg_id = (uint16_t)payload[pos] | ((uint16_t)payload[pos + 1] << 8);
+        pos += 2;
+        uint8_t length = payload[pos++];
+
+        /* Validate length fits within data[] and remaining payload */
+        if (length > sizeof(batch_out->messages[i].data))
+            return UL_ERR_BUFFER_OVERFLOW;
+        if (pos + length > payload_len)
+            return UL_ERR_BUFFER_OVERFLOW;
+
+        batch_out->messages[i].msg_id  = msg_id;
+        batch_out->messages[i].length  = length;
+        memcpy(batch_out->messages[i].data, &payload[pos], length);
+        pos += length;
+    }
+
+    batch_out->num_messages = num_messages;
+    return 0;
 }

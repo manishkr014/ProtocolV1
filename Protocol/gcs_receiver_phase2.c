@@ -140,9 +140,28 @@ void process_packet(ul_header_t *header, const uint8_t *payload, uint16_t payloa
     case UL_MSG_RC_INPUT:
         process_rc(payload, payload_len);
         break;
-    case UL_MSG_BATCH:
-        printf("  [BATCH] Multiple messages in one packet\n");
+    case UL_MSG_BATCH: {
+        ul_batch_t batch;
+        memset(&batch, 0, sizeof(batch));
+        int batch_err = ul_deserialize_batch(payload, payload_len, &batch);
+        if (batch_err == 0) {
+            printf("  [BATCH] %u sub-messages\n", batch.num_messages);
+            for (uint8_t bi = 0; bi < batch.num_messages; bi++) {
+                ul_header_t sub_hdr;
+                memset(&sub_hdr, 0, sizeof(sub_hdr));
+                sub_hdr.msg_id      = batch.messages[bi].msg_id;
+                sub_hdr.payload_len = batch.messages[bi].length;
+                sub_hdr.sequence    = header->sequence;
+                sub_hdr.sys_id      = header->sys_id;
+                sub_hdr.comp_id     = header->comp_id;
+                process_packet(&sub_hdr, batch.messages[bi].data,
+                               batch.messages[bi].length);
+            }
+        } else {
+            printf("  [BATCH] Deserialization error: %d\n", batch_err);
+        }
         break;
+    }
     default:
         printf("  [UNKNOWN] Message ID 0x%03X\n", header->msg_id);
         break;

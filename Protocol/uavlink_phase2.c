@@ -53,6 +53,10 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
 
             parser->payload_len = ((byte1 & 0xF0) << 4) | ((byte2 & 0x3F) << 2) | ((byte3 & 0xC0) >> 6);
 
+            // Extract stream_type now so EXT_HDR can detect CMD/CMD_ACK
+            // stream_type = bits[3:2] from buf[1] low 2 bits, bits[1:0] from buf[2] high 2 bits
+            parser->stream_type = ((byte1 & 0x3) << 2) | ((byte2 >> 6) & 0x3);
+
             // Always go to extended header to read system/component/message IDs
             parser->state = 2; // EXT_HDR
         }
@@ -61,9 +65,12 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
     case 2: // EXT_HDR (both encrypted and unencrypted)
         parser->header_buf[parser->bytes_received++] = byte;
 
-        // Extended header:
-        // Bytes 4-5: sequence (upper 10 bits) + sys_id (6 bits)
-        // Bytes 6-7: comp_id (4 bits) + msg_id (12 bits)
+        // Extended header layout (bytes counted from start of header_buf):
+        //   [0..3]  base header (4 bytes)
+        //   [4..5]  seq_sys: sequence upper bits + sys_id
+        //   [6..7]  comp_msg: comp_id + msg_id
+        //   [8]     target_sys_id (CMD/CMD_ACK only)
+        //   [8 or 9] nonce start (8 bytes, if encrypted)
 
         // Extract message ID after reading bytes 6-7 (comp_msg)
         if (parser->bytes_received == 8)
@@ -73,20 +80,29 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             parser->msg_id = comp_msg & 0xFFF; // Lower 12 bits are msg_id
         }
 
-        // Check if encrypted to determine extended header length
+        // Determine whether this is a CMD/CMD_ACK stream (has extra target_sys_id byte)
+        bool is_cmd = (parser->stream_type == UL_STREAM_CMD ||
+                       parser->stream_type == UL_STREAM_CMD_ACK);
+
+        // Routing section ends at bytes_received == 8 (non-CMD) or 9 (CMD)
+        uint16_t routing_end = is_cmd ? 9u : 8u;
+
+        // Check if encrypted to determine total extended header length
         bool encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
 
         if (encrypted)
         {
-            // For encrypted: routing (4 bytes) + nonce (8 bytes) = 12 bytes ext
-            // Total header = 4 (base) + 12 (ext) = 16 bytes
-            // Extract nonce when we have all 8 bytes (bytes 8-15)
-            if (parser->bytes_received == 16)
+            // Layout: routing (8 or 9 bytes) + nonce (8 bytes)
+            // Total header_buf bytes = routing_end + 8
+            uint16_t nonce_end = routing_end + 8u;
+
+            if (parser->bytes_received == nonce_end)
             {
-                memcpy(parser->cipher_nonce, &parser->header_buf[8], 8);
+                // Extract nonce: 8 bytes immediately after routing section
+                memcpy(parser->cipher_nonce, &parser->header_buf[routing_end], 8);
             }
 
-            if (parser->bytes_received >= 16)
+            if (parser->bytes_received >= nonce_end)
             {
                 parser->state = 3; // PAYLOAD
                 parser->bytes_received = 0;
@@ -94,8 +110,8 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
         }
         else
         {
-            // For unencrypted: only need routing info (4 bytes after base header)
-            if (parser->bytes_received >= 8)
+            // Unencrypted: header ends after routing section
+            if (parser->bytes_received >= routing_end)
             {
                 parser->state = 3; // PAYLOAD
                 parser->bytes_received = 0;
@@ -141,9 +157,14 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
 
         if (parser->bytes_received >= 2)
         {
-            // Verify CRC over header bytes 1..header_len-1, payload, and MAC (if encrypted)
+            // Verify CRC over header bytes 1..crc_header_len-1, payload, and MAC (if encrypted)
             bool crc_encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
-            int header_len = crc_encrypted ? 16 : 8;
+            bool crc_cmd = (parser->stream_type == UL_STREAM_CMD ||
+                            parser->stream_type == UL_STREAM_CMD_ACK);
+            // header_buf index where header ends:
+            //   base(4 bytes) + routing(4 bytes + 1 target_sys_id for CMD) + nonce(8 if encrypted)
+            int routing_end = crc_cmd ? 9 : 8;
+            int crc_header_len = crc_encrypted ? (routing_end + 8) : routing_end;
 
             uint16_t crc_in = (uint16_t)parser->header_buf[20] |
                                ((uint16_t)parser->header_buf[21] << 8);
@@ -151,7 +172,7 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             ul_crc_init(&crc_calc);
 
             // Hash header bytes (skip SOF at index 0)
-            for (int i = 1; i < header_len; i++)
+            for (int i = 1; i < crc_header_len; i++)
                 ul_crc_accumulate(parser->header_buf[i], &crc_calc);
 
             // Hash payload (ciphertext for encrypted, plaintext for unencrypted)
@@ -255,6 +276,10 @@ void ul_mempool_free(ul_mempool_t *pool, void *ptr)
 
     // Mark as free
     pool->free_mask |= (1U << index);
+
+    // Zero the released buffer: prevents decrypted plaintext / key material
+    // from persisting in memory and being readable via a later allocation.
+    memset(pool->buffers[index], 0, UL_MEMPOOL_BUFFER_SIZE);
 
     // Update statistics
     pool->free_count++;
@@ -384,9 +409,16 @@ int ul_parse_char_fast(ul_parser_zerocopy_t *parser, uint8_t byte, ul_mempool_t 
         return -1;
     }
 
-    // On first byte of new packet, allocate output buffer
+    // On first byte of new packet, allocate output buffer.
+    // If the caller never consumed last_payload from the previous packet, free it
+    // now to prevent pool exhaustion — the data is lost, but the pool doesn't leak.
     if (parser->state == 0 && !parser->output_payload)
     {
+        if (parser->last_payload)
+        {
+            ul_mempool_free(pool, parser->last_payload);
+            parser->last_payload = NULL;
+        }
         parser->output_payload = (uint8_t *)ul_mempool_alloc(pool);
         if (!parser->output_payload)
         {

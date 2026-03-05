@@ -98,7 +98,8 @@ static inline void chacha20_qr_neon(uint32x4_t *a, uint32x4_t *b,
  * @param len     Length of data
  */
 void ul_chacha20_neon(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len);
+                      const uint8_t *input, uint8_t *output, size_t len,
+                      uint32_t initial_counter);
 
 /**
  * ARM NEON accelerated ChaCha20-Poly1305 AEAD encryption
