@@ -594,9 +594,15 @@ int main(int argc, char *argv[])
                     }
                     break;
                 }
-                case UL_MSG_ATTITUDE:
+                case UL_MSG_RC_INPUT:
                 {
-                    // Silently receive — too frequent to print
+                    ul_rc_input_t rc;
+                    ul_deserialize_rc_input(&rc, parse_output);
+                    
+                    // Periodically print the Link Quality back to the operator
+                    if (packets_received % 50 == 0) {
+                        printf("[RC] Link Quality: %u%% | RSSI: %u\n", rc.quality, rc.rssi);
+                    }
                     break;
                 }
                 case UL_MSG_GPS_RAW:

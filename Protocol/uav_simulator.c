@@ -345,6 +345,8 @@ int main(int argc, char *argv[])
     uint16_t reasm_output_len = 0;
 
     // Main loop — send telemetry + check for commands
+    uint32_t last_gcs_msg_time = 0;
+    
     for (int loop = 0;; loop++)
     {
         // --- Check for incoming commands (non-blocking) ---
@@ -370,6 +372,7 @@ int main(int argc, char *argv[])
                 if (result == 1)
                 {
                     commands_received++;
+                    last_gcs_msg_time = loop; // Reset failsafe timer
 
                     // Decode header
                     ul_header_t hdr = {0};
@@ -566,6 +569,12 @@ int main(int argc, char *argv[])
             if (state.yaw > 180.0f)
                 state.yaw -= 360.0f;
             state.voltage -= 1;
+            
+            // Failsafe Check: 3 seconds without a message (30 ticks at 100ms)
+            if ((loop - last_gcs_msg_time) > 30 && state.flight_mode != UL_MODE_RTL && state.flight_mode != UL_MODE_LAND) {
+                printf("\n>>> FAILSAFE TRIGGERED: Link Lost! Auto-RTL engaged. <<<\n\n");
+                state.flight_mode = UL_MODE_RTL;
+            }
         }
 
         // --- Send telemetry ---

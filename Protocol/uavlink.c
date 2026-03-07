@@ -908,9 +908,15 @@ void ul_parser_init(ul_parser_t *p)
     if (!p)
         return;
 
-    memset(p, 0, sizeof(ul_parser_t));
     p->state = UL_PARSE_STATE_IDLE;
+    p->buf_idx = 0;
+    p->replay_init = 0;
+    p->last_seq = 0;
+    p->replay_window = 0;
+    p->rx_count = 0;
+    p->error_count = 0;
 }
+
 
 int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
 {
@@ -938,6 +944,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                 if (p->header.payload_len > UL_MAX_PAYLOAD_SIZE)
                 {
                     ul_parser_init(p);
+                    p->error_count++;
                     return UL_ERR_BUFFER_OVERFLOW;
                 }
 
@@ -954,6 +961,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
             else
             {
                 p->state = UL_PARSE_STATE_IDLE;
+                p->error_count++;
             }
         }
         break;
@@ -1008,6 +1016,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
             if (crc_in != crc_calc)
             {
                 ul_parser_init(p);
+                p->error_count++;
                 return UL_ERR_CRC;
             }
 
@@ -1019,6 +1028,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                 if (!key_32b)
                 {
                     ul_parser_init(p);
+                    p->error_count++;
                     return UL_ERR_NO_KEY;
                 }
 
@@ -1047,6 +1057,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                 {
                     /* MAC verification failed - packet has been tampered with! */
                     ul_parser_init(p);
+                    p->error_count++;
                     return UL_ERR_MAC_VERIFICATION;
                 }
             }

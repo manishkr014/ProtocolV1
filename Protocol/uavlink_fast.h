@@ -48,6 +48,10 @@ typedef struct
     uint8_t cipher_nonce[8]; // Nonce for decryption
     uint8_t cipher_tag[16];  // Authentication tag
     uint8_t *last_payload;   // Pointer to completed payload (valid after result==1)
+    
+    // Statistics
+    uint32_t rx_count;       // Total valid packets parsed
+    uint32_t error_count;    // Total packets corrupted or dropped
 } ul_parser_zerocopy_t;
 
 /**
@@ -55,6 +59,11 @@ typedef struct
  * @param parser Pointer to parser structure
  */
 void ul_parser_zerocopy_init(ul_parser_zerocopy_t *parser);
+
+/**
+ * Get the link quality (0-100) based on rx_count and error_count.
+ */
+uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p);
 
 /**
  * Parse a single byte with zero-copy (user provides output buffer)

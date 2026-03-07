@@ -153,6 +153,10 @@ typedef struct
     uint8_t  replay_init;         /* 1 once first valid packet received */
     uint8_t  last_seq;            /* Highest accepted sequence number    */
     uint32_t replay_window;       /* Bitmap: bit i set => (last_seq - i) seen */
+    
+    /* Statistics / Link Quality */
+    uint32_t rx_count;            /* Total packets successfully received */
+    uint32_t error_count;         /* Total packets with CRC/MAC errors */
 } ul_parser_t;
 
 /* --- Nonce State Management (for secure encryption) --- */

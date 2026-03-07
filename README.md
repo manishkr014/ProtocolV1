@@ -18,6 +18,8 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 - ✅ **Sliding Window Replay Protection** - 32-packet bitmap window in `ul_parser_t` rejects duplicate/replayed packets
 - ✅ **Batch Message Support** - Pack/unpack multiple sub-messages in a single encrypted packet
 - ✅ **Fragmentation Support** - Handle payloads up to 4095 bytes with built-in fragmentation
+- ✅ **Link Quality Metrics** - Track valid vs dropped packets for real-time link integrity
+- ✅ **Automatic Failsafe RTL** - Simulation includes configurable timeouts handling live disconnects
 
 ### 🚀 Performance Summary
 

@@ -19,6 +19,26 @@ void ul_parser_zerocopy_init(ul_parser_zerocopy_t *parser)
     parser->state = 0; // Start at SYNC1 state
 }
 
+uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p)
+{
+    if (!p) return 0;
+    
+    // Avoid divide-by-zero
+    if (p->rx_count + p->error_count == 0) return 0;
+    
+    uint32_t total = p->rx_count + p->error_count;
+    
+    // Simplistic rolling quality calculation:
+    // If we have very few packets, assume 100% unless there are errors.
+    // If we have many, just calculate the direct ratio.
+    float ratio = (float)(p->rx_count) / (float)total;
+    uint8_t qual = (uint8_t)(ratio * 100.0f);
+    
+    // Cap at 100
+    if (qual > 100) qual = 100;
+    return qual;
+}
+
 int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf)
 {
     if (!parser || !output_buf)
