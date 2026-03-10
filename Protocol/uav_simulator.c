@@ -27,11 +27,28 @@
 
 #include "monocypher.h"
 
+// Cross-platform millisecond timer
+static uint32_t get_time_ms(void)
+{
+#ifdef _WIN32
+    return (uint32_t)GetTickCount();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
+}
+
 // ECDH Session Key State
 static uint8_t session_key[32] = {0};
 static uint8_t private_key[32] = {0};
 static uint8_t public_key[32] = {0};
-static bool session_established = false;
+static ul_ecdh_state_t ecdh_state = UL_ECDH_IDLE;
+static uint8_t ecdh_seq_num = 1;         // Our handshake sequence number
+static uint8_t ecdh_peer_seq = 0;        // Peer's sequence number
+static uint32_t ecdh_retry_count = 0;    // Number of retries
+static uint32_t ecdh_last_send_time = 0; // For exponential backoff
+static uint32_t ecdh_timeout_ms = 5000;  // 5 second timeout
 
 // Flight mode name lookup
 static const char *mode_names[] = {
@@ -297,12 +314,12 @@ int main(int argc, char *argv[])
     struct sockaddr_in cmd_bind_addr;
     memset(&cmd_bind_addr, 0, sizeof(cmd_bind_addr));
     cmd_bind_addr.sin_family = AF_INET;
-    cmd_bind_addr.sin_port = htons(14551);
+    cmd_bind_addr.sin_port = htons(14553);
     cmd_bind_addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(cmd_sock, (struct sockaddr *)&cmd_bind_addr, sizeof(cmd_bind_addr)) < 0)
     {
-        printf("ERROR: Failed to bind command socket to port 14551\n");
+        printf("ERROR: Failed to bind command socket to port 14553\n");
         return 1;
     }
 
@@ -315,14 +332,15 @@ int main(int argc, char *argv[])
     fcntl(cmd_sock, F_SETFL, flags | O_NONBLOCK);
 #endif
 
-    printf("Telemetry -> %s:14550\n", gcs_ip);
-    printf("Commands  <- 0.0.0.0:14551\n");
+    printf("Telemetry -> %s:14550 (Proxy target)\n", gcs_ip);
+    printf("Commands  <- 0.0.0.0:14553 (From proxy)\n");
     printf("Status: DISARMED | Mode: MANUAL\n");
     printf("Waiting for commands...\n\n");
 
     // Generate ECDH Keys
     srand((unsigned int)time(NULL) ^ 0x0A0B);
-    for (int i = 0; i < 32; i++) private_key[i] = rand() & 0xFF;
+    for (int i = 0; i < 32; i++)
+        private_key[i] = rand() & 0xFF;
     crypto_x25519_public_key(public_key, private_key);
     printf("ECDH: UAV Public Key generated. Waiting for GCS connection...\n");
 
@@ -353,7 +371,7 @@ int main(int argc, char *argv[])
 
     // Main loop — send telemetry + check for commands
     uint32_t last_gcs_msg_time = 0;
-    
+
     for (int loop = 0;; loop++)
     {
         // --- Check for incoming commands (non-blocking) ---
@@ -443,16 +461,94 @@ int main(int argc, char *argv[])
                     {
                         ul_key_exchange_t rx_kx;
                         ul_deserialize_key_exchange(&rx_kx, parse_buf);
-                        uint8_t raw_shared[32];
-                        crypto_x25519(raw_shared, private_key, rx_kx.public_key);
-                        crypto_blake2b(session_key, 32, raw_shared, 32);
-                        session_established = true;
-                        printf("  >>> ECDH Session Key Established with GCS!\n");
+
+                        // Ignore duplicate KEY_EXCHANGE (same seq_num we already processed)
+                        if (ecdh_state == UL_ECDH_ESTABLISHED && rx_kx.seq_num == ecdh_peer_seq)
+                        {
+                            printf("  (Duplicate KEY_EXCHANGE seq=%u, already established)\n", rx_kx.seq_num);
+                            break;
+                        }
+
+                        // If we're in SENT_KEY or later and receive their key, establish immediately
+                        // This means our key reached them and they're sending theirs back
+                        if (ecdh_state >= UL_ECDH_SENT_KEY)
+                        {
+                            // Compute shared secret
+                            uint8_t raw_shared[32];
+                            crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                            crypto_blake2b(session_key, 32, raw_shared, 32);
+
+                            ecdh_peer_seq = rx_kx.seq_num;
+                            ecdh_state = UL_ECDH_ESTABLISHED; // Both sides have keys now!
+                            ecdh_retry_count = 0;             // Reset retry counter
+
+                            printf("  >>> ECDH: Session ESTABLISHED! Received GCS key seq=%u\n", rx_kx.seq_num);
+                        }
+                        else
+                        {
+                            // We haven't sent our key yet, compute shared secret and send our key
+                            uint8_t raw_shared[32];
+                            crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                            crypto_blake2b(session_key, 32, raw_shared, 32);
+
+                            ecdh_peer_seq = rx_kx.seq_num;
+                            ecdh_state = UL_ECDH_RECEIVED_KEY;
+
+                            printf("  >>> ECDH: Received GCS key (seq=%u)\n", rx_kx.seq_num);
+                        }
+
+                        // Always send ACK when we receive KEY_EXCHANGE
+                        ul_key_exchange_ack_t kx_ack = {0};
+                        kx_ack.seq_num = rx_kx.seq_num;
+                        kx_ack.status = 0; // OK
+
+                        uint8_t ack_payload[2];
+                        int ack_len = ul_serialize_key_exchange_ack(&kx_ack, ack_payload);
+
+                        ul_header_t ack_hdr = {0};
+                        ack_hdr.payload_len = ack_len;
+                        ack_hdr.priority = UL_PRIO_HIGH;
+                        ack_hdr.stream_type = UL_STREAM_CMD_ACK;
+                        ack_hdr.encrypted = false;
+                        ack_hdr.sequence = state.sequence++;
+                        ack_hdr.sys_id = 1;
+                        ack_hdr.comp_id = 1;
+                        ack_hdr.target_sys_id = 255;
+                        ack_hdr.msg_id = UL_MSG_KEY_EXCHANGE_ACK;
+
+                        uint8_t *ack_buf = NULL;
+                        int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload, session_key,
+                                                       &nonce_state, &crypto_ctx, &ack_buf);
+                        if (ack_pkt_len > 0 && ack_buf)
+                        {
+                            sendto(telem_sock, (char *)ack_buf, ack_pkt_len, 0,
+                                   (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
+                            ul_mempool_free(&pool, ack_buf);
+                        }
+                        break;
+                    }
+                    case UL_MSG_KEY_EXCHANGE_ACK:
+                    {
+                        ul_key_exchange_ack_t rx_ack;
+                        ul_deserialize_key_exchange_ack(&rx_ack, parse_buf);
+
+                        // Check if this ACK is for our current handshake
+                        if (rx_ack.seq_num == ecdh_seq_num && ecdh_state == UL_ECDH_SENT_KEY)
+                        {
+                            ecdh_state = UL_ECDH_ESTABLISHED;
+                            printf("  >>> ECDH: Session ESTABLISHED! (seq=%u confirmed)\n", ecdh_seq_num);
+                        }
+                        else
+                        {
+                            printf("  (Ignoring ACK seq=%u, expected=%u, state=%u)\n",
+                                   rx_ack.seq_num, ecdh_seq_num, ecdh_state);
+                        }
                         break;
                     }
                     case UL_MSG_CMD:
                     {
-                        if (!session_established) break;
+                        if (ecdh_state != UL_ECDH_ESTABLISHED)
+                            break;
                         ul_mode_change_t mode;
                         ul_deserialize_mode_change(&mode, parse_buf);
                         printf("Mode change -> %s (0x%02X)\n",
@@ -563,8 +659,7 @@ int main(int argc, char *argv[])
                 ul_mempool_free(&pool, parse_buf);
             }
         }
-    next_iter:
-        ; // Empty statement required after label before declaration
+    next_iter:; // Empty statement required after label before declaration
 
         // --- Update simulation ---
         float t = loop * 0.1f;
@@ -576,9 +671,10 @@ int main(int argc, char *argv[])
             if (state.yaw > 180.0f)
                 state.yaw -= 360.0f;
             state.voltage -= 1;
-            
+
             // Failsafe Check: 3 seconds without a message (30 ticks at 100ms)
-            if ((loop - last_gcs_msg_time) > 30 && state.flight_mode != UL_MODE_RTL && state.flight_mode != UL_MODE_LAND) {
+            if ((loop - last_gcs_msg_time) > 30 && state.flight_mode != UL_MODE_RTL && state.flight_mode != UL_MODE_LAND)
+            {
                 printf("\n>>> FAILSAFE TRIGGERED: Link Lost! Auto-RTL engaged. <<<\n\n");
                 state.flight_mode = UL_MODE_RTL;
             }
@@ -586,45 +682,79 @@ int main(int argc, char *argv[])
 
         // --- Send telemetry ---
 
-        // Send Key Exchange broadly until established
-        if (!session_established && loop % 10 == 0)
+        // ECDH Handshake with Exponential Backoff and Timeout
+        if (ecdh_state != UL_ECDH_ESTABLISHED)
         {
-            ul_key_exchange_t kx = {0};
-            memcpy(kx.public_key, public_key, 32);
+            uint32_t current_time = get_time_ms();
 
-            uint8_t payload[32];
-            int payload_len = ul_serialize_key_exchange(&kx, payload);
-
-            ul_header_t header = {0};
-            header.payload_len = payload_len;
-            header.priority = UL_PRIO_HIGH;
-            header.stream_type = UL_STREAM_CMD;
-            header.encrypted = false;
-            header.sequence = state.sequence++;
-            header.sys_id = 1;
-            header.comp_id = 1;
-            header.target_sys_id = 255; // GCS
-            header.msg_id = UL_MSG_KEY_EXCHANGE;
-
-            uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
-            if (packet_len > 0 && packet_buf)
+            // Check for timeout - restart handshake if we've been stuck
+            if (ecdh_state != UL_ECDH_IDLE &&
+                (current_time - ecdh_last_send_time) > ecdh_timeout_ms)
             {
-                sendto(telem_sock, (char *)packet_buf, packet_len, 0,
-                       (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
-                ul_mempool_free(&pool, packet_buf);
+                printf("\n>>> ECDH: Timeout! Restarting handshake (was in state %u) <<<\n", ecdh_state);
+                ecdh_state = UL_ECDH_IDLE;
+                ecdh_retry_count = 0;
+                ecdh_seq_num++; // Increment sequence for new attempt
+            }
+
+            // Exponential backoff calculation: 100ms * 2^retry, max 2000ms
+            uint32_t backoff_ms = 100 * (1 << (ecdh_retry_count < 5 ? ecdh_retry_count : 4));
+            if (backoff_ms > 2000)
+                backoff_ms = 2000;
+
+            // Send KEY_EXCHANGE if not established and backoff elapsed
+            if (ecdh_state != UL_ECDH_ESTABLISHED &&
+                (current_time - ecdh_last_send_time) >= backoff_ms)
+            {
+                ul_key_exchange_t kx = {0};
+                memcpy(kx.public_key, public_key, 32);
+                kx.seq_num = ecdh_seq_num;
+
+                uint8_t payload[33];
+                int payload_len = ul_serialize_key_exchange(&kx, payload);
+
+                ul_header_t header = {0};
+                header.payload_len = payload_len;
+                header.priority = UL_PRIO_HIGH;
+                header.stream_type = UL_STREAM_CMD;
+                header.encrypted = false;
+                header.sequence = state.sequence++;
+                header.sys_id = 1;
+                header.comp_id = 1;
+                header.target_sys_id = 255; // GCS
+                header.msg_id = UL_MSG_KEY_EXCHANGE;
+
+                uint8_t *packet_buf = NULL;
+                int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
+                                              &nonce_state, &crypto_ctx, &packet_buf);
+                if (packet_len > 0 && packet_buf)
+                {
+                    sendto(telem_sock, (char *)packet_buf, packet_len, 0,
+                           (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
+                    ul_mempool_free(&pool, packet_buf);
+
+                    ecdh_state = UL_ECDH_SENT_KEY;
+                    ecdh_last_send_time = current_time;
+                    ecdh_retry_count++;
+
+                    if (ecdh_retry_count == 1)
+                        printf("\n>>> ECDH: Sending KEY_EXCHANGE seq=%u <<<\n", ecdh_seq_num);
+                    else
+                        printf(">>> ECDH: Retry #%u (backoff=%ums) seq=%u <<<\n",
+                               ecdh_retry_count - 1, backoff_ms, ecdh_seq_num);
+                }
             }
         }
 
-        if (!session_established) goto end_loop;
+        if (ecdh_state != UL_ECDH_ESTABLISHED)
+            goto end_loop;
 
         // Heartbeat (1 Hz)
         if (loop % 10 == 0)
         {
             ul_heartbeat_t hb = {0};
             hb.system_status = state.armed ? 0x04 : 0x03; // Active vs Standby
-            hb.system_type = 0x02;                         // Quadcopter
+            hb.system_type = 0x02;                        // Quadcopter
             hb.base_mode = state.armed ? 0x81 : 0x01;     // Armed flag in bit 7
             hb.base_mode |= (state.flight_mode << 2);
 
@@ -731,13 +861,12 @@ int main(int argc, char *argv[])
                    get_mode_name(state.flight_mode),
                    packets_sent, commands_received,
                    state.voltage / 1000.0f);
-            
+
             // Periodically save the nonce to NVM to keep the jump safe
             save_nonce_state(&nonce_state, "uav_nonce.dat");
         }
 
-    end_loop:
-        ; // End loop label
+    end_loop:; // End loop label
 
 // 100ms loop (10 Hz)
 #ifdef _WIN32

@@ -29,11 +29,28 @@
 #include <sys/select.h>
 #endif
 
+// Cross-platform millisecond timer
+static uint32_t get_time_ms(void)
+{
+#ifdef _WIN32
+    return (uint32_t)GetTickCount();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
+}
+
 // ECDH Session Key State
 static uint8_t session_key[32] = {0};
 static uint8_t private_key[32] = {0};
 static uint8_t public_key[32] = {0};
-static bool session_established = false;
+static ul_ecdh_state_t ecdh_state = UL_ECDH_IDLE;
+static uint8_t ecdh_seq_num = 1;         // Our handshake sequence number
+static uint8_t ecdh_peer_seq = 0;        // Peer's sequence number
+static uint32_t ecdh_retry_count = 0;    // Number of retries
+static uint32_t ecdh_last_send_time = 0; // For exponential backoff
+static uint32_t ecdh_timeout_ms = 5000;  // 5 second timeout
 
 // Flight mode name lookup
 static const char *mode_names[] = {
@@ -390,12 +407,12 @@ int main(int argc, char *argv[])
     struct sockaddr_in recv_addr;
     memset(&recv_addr, 0, sizeof(recv_addr));
     recv_addr.sin_family = AF_INET;
-    recv_addr.sin_port = htons(14550);
+    recv_addr.sin_port = htons(14552);
     recv_addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(recv_sock, (struct sockaddr *)&recv_addr, sizeof(recv_addr)) < 0)
     {
-        printf("ERROR: Failed to bind to port 14550\n");
+        printf("ERROR: Failed to bind to port 14552\n");
         return 1;
     }
 
@@ -422,13 +439,14 @@ int main(int argc, char *argv[])
     uav_cmd_addr.sin_port = htons(14551);
     uav_cmd_addr.sin_addr.s_addr = inet_addr(uav_ip);
 
-    printf("Listening on UDP port 14550 (telemetry + ACKs)\n");
-    printf("Sending commands to %s:14551\n", uav_ip);
+    printf("Listening on UDP port 14552 (telemetry + ACKs from Proxy)\n");
+    printf("Sending commands to %s:14551 (Proxy target)\n", uav_ip);
     print_menu();
 
     // Generate ECDH Keys
     srand((unsigned int)time(NULL) ^ 0x6C73);
-    for (int i = 0; i < 32; i++) private_key[i] = rand() & 0xFF;
+    for (int i = 0; i < 32; i++)
+        private_key[i] = rand() & 0xFF;
     crypto_x25519_public_key(public_key, private_key);
     printf("ECDH: GCS Public Key generated. Waiting for UAV connection...\n");
 
@@ -450,27 +468,66 @@ int main(int argc, char *argv[])
     // Main loop
     while (1)
     {
-        // Send Key Exchange broadly until established
-        if (!session_established && loop_counter % 100 == 0) // ~1Hz if sleep 10ms
+        // ECDH Handshake with Exponential Backoff and Timeout
+        if (ecdh_state != UL_ECDH_ESTABLISHED)
         {
-            ul_key_exchange_t kx = {0};
-            memcpy(kx.public_key, public_key, 32);
+            uint32_t current_time = get_time_ms();
 
-            uint8_t payload[32];
-            int payload_len = ul_serialize_key_exchange(&kx, payload);
+            // Check for timeout - restart handshake if we've been stuck
+            if (ecdh_state != UL_ECDH_IDLE &&
+                (current_time - ecdh_last_send_time) > ecdh_timeout_ms)
+            {
+                printf("\n>>> ECDH: Timeout! Restarting handshake (was in state %u) <<<\n>>> ", ecdh_state);
+                fflush(stdout);
+                ecdh_state = UL_ECDH_IDLE;
+                ecdh_retry_count = 0;
+                ecdh_seq_num++; // Increment sequence for new attempt
+            }
 
-            ul_header_t header = {0};
-            header.payload_len = payload_len;
-            header.priority = UL_PRIO_HIGH;
-            header.stream_type = UL_STREAM_CMD;
-            header.encrypted = false;
-            header.sequence = cmd_sequence++;
-            header.sys_id = 255;
-            header.comp_id = 0;
-            header.target_sys_id = 1; // UAV
-            header.msg_id = UL_MSG_KEY_EXCHANGE;
+            // Exponential backoff calculation: 100ms * 2^retry, max 2000ms
+            uint32_t backoff_ms = 100 * (1 << (ecdh_retry_count < 5 ? ecdh_retry_count : 4));
+            if (backoff_ms > 2000)
+                backoff_ms = 2000;
 
-            send_command_packet(cmd_sock, &uav_cmd_addr, &header, payload, &pool, &nonce_state, &crypto_ctx);
+            // Send KEY_EXCHANGE if not established and backoff elapsed
+            if (ecdh_state != UL_ECDH_ESTABLISHED &&
+                (current_time - ecdh_last_send_time) >= backoff_ms)
+            {
+                ul_key_exchange_t kx = {0};
+                memcpy(kx.public_key, public_key, 32);
+                kx.seq_num = ecdh_seq_num;
+
+                uint8_t payload[33];
+                int payload_len = ul_serialize_key_exchange(&kx, payload);
+
+                ul_header_t header = {0};
+                header.payload_len = payload_len;
+                header.priority = UL_PRIO_HIGH;
+                header.stream_type = UL_STREAM_CMD;
+                header.encrypted = false;
+                header.sequence = cmd_sequence++;
+                header.sys_id = 255;
+                header.comp_id = 0;
+                header.target_sys_id = 1; // UAV
+                header.msg_id = UL_MSG_KEY_EXCHANGE;
+
+                send_command_packet(cmd_sock, &uav_cmd_addr, &header, payload, &pool, &nonce_state, &crypto_ctx);
+
+                ecdh_state = UL_ECDH_SENT_KEY;
+                ecdh_last_send_time = current_time;
+                ecdh_retry_count++;
+
+                if (ecdh_retry_count == 1)
+                {
+                    printf("\n>>> ECDH: Sending KEY_EXCHANGE seq=%u <<<\n>>> ", ecdh_seq_num);
+                }
+                else
+                {
+                    printf("\n>>> ECDH: Retry #%u (backoff=%ums) seq=%u <<<\n>>> ",
+                           ecdh_retry_count - 1, backoff_ms, ecdh_seq_num);
+                }
+                fflush(stdout);
+            }
         }
         loop_counter++;
 
@@ -478,7 +535,8 @@ int main(int argc, char *argv[])
         if (key_available())
         {
             int key = get_key();
-            if (!session_established && key != '0') {
+            if (ecdh_state != UL_ECDH_ESTABLISHED && key != '0')
+            {
                 printf("\n[ERROR] ECDH Session not established yet! Command ignored.\n>>> ");
                 fflush(stdout);
                 goto skip_input;
@@ -553,8 +611,7 @@ int main(int argc, char *argv[])
             default:
                 break;
             }
-skip_input:
-            ;
+        skip_input:;
         }
 
         // --- Receive telemetry + ACKs (non-blocking) ---
@@ -602,6 +659,13 @@ skip_input:
                     if (auth_result != 0)
                     {
                         parse_errors++;
+                        // Log MAC failures during security testing
+                        if (parse_errors % 10 == 0)
+                        {
+                            printf("\n[SECURITY] MAC verification failures: %u (total pkts:%u)\n>>> ",
+                                   parse_errors, packets_received);
+                            fflush(stdout);
+                        }
                         continue;
                     }
                 }
@@ -613,12 +677,85 @@ skip_input:
                 {
                     ul_key_exchange_t rx_kx;
                     ul_deserialize_key_exchange(&rx_kx, parse_output);
-                    uint8_t raw_shared[32];
-                    crypto_x25519(raw_shared, private_key, rx_kx.public_key);
-                    crypto_blake2b(session_key, 32, raw_shared, 32);
-                    if (!session_established) {
-                        session_established = true;
-                        printf("\n  >>> ECDH Session Key Established with UAV!\n>>> ");
+
+                    // Ignore duplicate KEY_EXCHANGE (same seq_num we already processed)
+                    if (ecdh_state == UL_ECDH_ESTABLISHED && rx_kx.seq_num == ecdh_peer_seq)
+                    {
+                        printf("\n  (Duplicate KEY_EXCHANGE seq=%u, already established)\n>>> ", rx_kx.seq_num);
+                        fflush(stdout);
+                        break;
+                    }
+
+                    // If we're in SENT_KEY or later and receive their key, establish immediately
+                    // This means our key reached them and they're sending theirs back
+                    if (ecdh_state >= UL_ECDH_SENT_KEY)
+                    {
+                        // Compute shared secret
+                        uint8_t raw_shared[32];
+                        crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                        crypto_blake2b(session_key, 32, raw_shared, 32);
+
+                        ecdh_peer_seq = rx_kx.seq_num;
+                        ecdh_state = UL_ECDH_ESTABLISHED; // Both sides have keys now!
+                        ecdh_retry_count = 0;             // Reset retry counter
+
+                        printf("\n  >>> ECDH: Session ESTABLISHED! Received UAV key seq=%u\n>>> ", rx_kx.seq_num);
+                        fflush(stdout);
+                    }
+                    else
+                    {
+                        // We haven't sent our key yet, compute shared secret and prepare to send
+                        uint8_t raw_shared[32];
+                        crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                        crypto_blake2b(session_key, 32, raw_shared, 32);
+
+                        ecdh_peer_seq = rx_kx.seq_num;
+                        ecdh_state = UL_ECDH_RECEIVED_KEY;
+
+                        printf("\n  >>> ECDH: Received UAV key (seq=%u)\n>>> ", rx_kx.seq_num);
+                        fflush(stdout);
+                    }
+
+                    // Always send ACK when we receive KEY_EXCHANGE
+                    ul_key_exchange_ack_t kx_ack = {0};
+                    kx_ack.seq_num = rx_kx.seq_num;
+                    kx_ack.status = 0; // OK
+
+                    uint8_t ack_payload[2];
+                    int ack_len = ul_serialize_key_exchange_ack(&kx_ack, ack_payload);
+
+                    ul_header_t ack_hdr = {0};
+                    ack_hdr.payload_len = ack_len;
+                    ack_hdr.priority = UL_PRIO_HIGH;
+                    ack_hdr.stream_type = UL_STREAM_CMD_ACK;
+                    ack_hdr.encrypted = false;
+                    ack_hdr.sequence = cmd_sequence++;
+                    ack_hdr.sys_id = 255;
+                    ack_hdr.comp_id = 0;
+                    ack_hdr.target_sys_id = 1;
+                    ack_hdr.msg_id = UL_MSG_KEY_EXCHANGE_ACK;
+
+                    uint8_t *ack_buf = NULL;
+                    int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload, session_key,
+                                                   &nonce_state, &crypto_ctx, &ack_buf);
+                    if (ack_pkt_len > 0 && ack_buf)
+                    {
+                        sendto(cmd_sock, (char *)ack_buf, ack_pkt_len, 0,
+                               (struct sockaddr *)&uav_cmd_addr, sizeof(uav_cmd_addr));
+                        ul_mempool_free(&pool, ack_buf);
+                    }
+                    break;
+                }
+                case UL_MSG_KEY_EXCHANGE_ACK:
+                {
+                    ul_key_exchange_ack_t rx_ack;
+                    ul_deserialize_key_exchange_ack(&rx_ack, parse_output);
+
+                    // Check if this ACK is for our current handshake
+                    if (rx_ack.seq_num == ecdh_seq_num && ecdh_state == UL_ECDH_SENT_KEY)
+                    {
+                        ecdh_state = UL_ECDH_ESTABLISHED;
+                        printf("\n  >>> ECDH: Session ESTABLISHED! (seq=%u confirmed)\n>>> ", ecdh_seq_num);
                         fflush(stdout);
                     }
                     break;
@@ -631,7 +768,8 @@ skip_input:
                     uint8_t mode = (hb.base_mode >> 2) & 0x07;
 
                     // Print heartbeat only every 5 seconds (not every 1s)
-                    if (packets_received - last_telem_print >= 30)
+                    // MODIFIED FOR TESTING: Print more frequently to see errors
+                    if (packets_received - last_telem_print >= 10 || packets_received <= 50)
                     {
                         printf("[HB] %s | %s | Status:0x%X | Pkts:%u ACKs:%u Errors:%u\n",
                                armed ? "ARMED" : "DISARMED",
@@ -639,7 +777,8 @@ skip_input:
                                hb.system_status,
                                packets_received, acks_received, parse_errors);
                         last_telem_print = packets_received;
-                        
+                        fflush(stdout);
+
                         // Periodically save the nonce to NVM to keep the jump safe
                         save_nonce_state(&nonce_state, "gcs_nonce.dat");
                     }
@@ -649,9 +788,10 @@ skip_input:
                 {
                     ul_rc_input_t rc;
                     ul_deserialize_rc_input(&rc, parse_output);
-                    
+
                     // Periodically print the Link Quality back to the operator
-                    if (packets_received % 50 == 0) {
+                    if (packets_received % 50 == 0)
+                    {
                         printf("[RC] Link Quality: %u%% | RSSI: %u\n", rc.quality, rc.rssi);
                     }
                     break;

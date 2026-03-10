@@ -84,41 +84,42 @@ typedef struct
 } ul_header_t;
 
 /* Message IDs */
-#define UL_MSG_HEARTBEAT     0x001
-#define UL_MSG_ATTITUDE      0x002
-#define UL_MSG_GPS_RAW       0x003
-#define UL_MSG_BATTERY       0x004
-#define UL_MSG_RC_INPUT      0x005
-#define UL_MSG_CMD           0x006
-#define UL_MSG_CMD_ACK       0x007
-#define UL_MSG_MODE_CHANGE   0x008
-#define UL_MSG_MISSION_ITEM  0x009
-#define UL_MSG_KEY_EXCHANGE  0x00A
-#define UL_MSG_BATCH         0x3FF /* Special message ID for message batching */
+#define UL_MSG_HEARTBEAT 0x001
+#define UL_MSG_ATTITUDE 0x002
+#define UL_MSG_GPS_RAW 0x003
+#define UL_MSG_BATTERY 0x004
+#define UL_MSG_RC_INPUT 0x005
+#define UL_MSG_CMD 0x006
+#define UL_MSG_CMD_ACK 0x007
+#define UL_MSG_MODE_CHANGE 0x008
+#define UL_MSG_MISSION_ITEM 0x009
+#define UL_MSG_KEY_EXCHANGE 0x00A
+#define UL_MSG_KEY_EXCHANGE_ACK 0x00B
+#define UL_MSG_BATCH 0x3FF /* Special message ID for message batching */
 
 /* Command IDs (used in ul_command_t.command_id) */
-#define UL_CMD_ARM         0x0001  /* Arm motors */
-#define UL_CMD_DISARM      0x0002  /* Disarm motors */
-#define UL_CMD_TAKEOFF     0x0003  /* Takeoff to altitude (param1 = alt in cm) */
-#define UL_CMD_LAND        0x0004  /* Land at current position */
-#define UL_CMD_RTL         0x0005  /* Return to launch */
-#define UL_CMD_EMERGENCY   0x0006  /* Emergency stop */
+#define UL_CMD_ARM 0x0001       /* Arm motors */
+#define UL_CMD_DISARM 0x0002    /* Disarm motors */
+#define UL_CMD_TAKEOFF 0x0003   /* Takeoff to altitude (param1 = alt in cm) */
+#define UL_CMD_LAND 0x0004      /* Land at current position */
+#define UL_CMD_RTL 0x0005       /* Return to launch */
+#define UL_CMD_EMERGENCY 0x0006 /* Emergency stop */
 
 /* ACK Result Codes (used in ul_command_ack_t.result) */
-#define UL_ACK_OK          0x00  /* Command accepted */
-#define UL_ACK_REJECTED    0x01  /* Command rejected (wrong state) */
-#define UL_ACK_UNSUPPORTED 0x02  /* Unknown command ID */
-#define UL_ACK_FAILED      0x03  /* Command failed */
-#define UL_ACK_IN_PROGRESS 0x04  /* Command in progress */
+#define UL_ACK_OK 0x00          /* Command accepted */
+#define UL_ACK_REJECTED 0x01    /* Command rejected (wrong state) */
+#define UL_ACK_UNSUPPORTED 0x02 /* Unknown command ID */
+#define UL_ACK_FAILED 0x03      /* Command failed */
+#define UL_ACK_IN_PROGRESS 0x04 /* Command in progress */
 
 /* Flight Modes (used in ul_mode_change_t.mode) */
-#define UL_MODE_MANUAL     0x00
-#define UL_MODE_STABILIZE  0x01
-#define UL_MODE_ALT_HOLD   0x02
-#define UL_MODE_LOITER     0x03
-#define UL_MODE_AUTO       0x04
-#define UL_MODE_RTL        0x05
-#define UL_MODE_LAND       0x06
+#define UL_MODE_MANUAL 0x00
+#define UL_MODE_STABILIZE 0x01
+#define UL_MODE_ALT_HOLD 0x02
+#define UL_MODE_LOITER 0x03
+#define UL_MODE_AUTO 0x04
+#define UL_MODE_RTL 0x05
+#define UL_MODE_LAND 0x06
 
 /* --- OPTIMIZATION: Selective Encryption Policies --- */
 typedef enum
@@ -151,13 +152,13 @@ typedef struct
     uint8_t payload[512]; // Must match buffer[512] to prevent overflow
 
     /* Replay protection: 32-packet sliding window keyed on sequence number */
-    uint8_t  replay_init;         /* 1 once first valid packet received */
-    uint8_t  last_seq;            /* Highest accepted sequence number    */
-    uint32_t replay_window;       /* Bitmap: bit i set => (last_seq - i) seen */
-    
+    uint8_t replay_init;    /* 1 once first valid packet received */
+    uint8_t last_seq;       /* Highest accepted sequence number    */
+    uint32_t replay_window; /* Bitmap: bit i set => (last_seq - i) seen */
+
     /* Statistics / Link Quality */
-    uint32_t rx_count;            /* Total packets successfully received */
-    uint32_t error_count;         /* Total packets with CRC/MAC errors */
+    uint32_t rx_count;    /* Total packets successfully received */
+    uint32_t error_count; /* Total packets with CRC/MAC errors */
 } ul_parser_t;
 
 /* --- Nonce State Management (for secure encryption) --- */
@@ -248,11 +249,28 @@ typedef struct
 
 /* --- Command & Control Messages --- */
 
+/* ECDH Handshake States */
+typedef enum
+{
+    UL_ECDH_IDLE = 0,         /* No handshake initiated */
+    UL_ECDH_SENT_KEY = 1,     /* Sent our public key, waiting for peer's key */
+    UL_ECDH_RECEIVED_KEY = 2, /* Received peer's key, sent ACK, waiting for peer's ACK */
+    UL_ECDH_ESTABLISHED = 3   /* Both sides confirmed, session ready */
+} ul_ecdh_state_t;
+
 /* Session Key Exchange (ECDH Public Key) */
 typedef struct
 {
     uint8_t public_key[32]; // 256-bit X25519 public key
+    uint8_t seq_num;        // Handshake sequence number (to detect duplicates)
 } ul_key_exchange_t;
+
+/* Session Key Exchange ACK */
+typedef struct
+{
+    uint8_t seq_num; // Echo the sequence number we're acknowledging
+    uint8_t status;  // 0 = OK, 1 = Error
+} ul_key_exchange_ack_t;
 
 /* Generic command (GCS -> UAV) */
 typedef struct
@@ -292,42 +310,45 @@ typedef struct
 } ul_mission_item_t;
 
 /* --- Fragment Reassembly --- */
-#define UL_FRAG_MAX_PAYLOAD   256   // Max payload per fragment
-#define UL_FRAG_MAX_FRAGMENTS  16   // Max fragments per message
-#define UL_FRAG_MAX_TOTAL    4096   // Max reassembled payload (256 * 16)
-#define UL_FRAG_TIMEOUT_MS   5000   // Reassembly timeout
+#define UL_FRAG_MAX_PAYLOAD 256  // Max payload per fragment
+#define UL_FRAG_MAX_FRAGMENTS 16 // Max fragments per message
+#define UL_FRAG_MAX_TOTAL 4096   // Max reassembled payload (256 * 16)
+#define UL_FRAG_TIMEOUT_MS 5000  // Reassembly timeout
 
-typedef struct {
-    uint8_t  num_fragments;             // Total fragments generated
-    uint8_t  payloads[16][256];         // Fragment payloads
-    uint16_t payload_lens[16];          // Length of each fragment
-    ul_header_t headers[16];            // Pre-filled headers per fragment
+typedef struct
+{
+    uint8_t num_fragments;     // Total fragments generated
+    uint8_t payloads[16][256]; // Fragment payloads
+    uint16_t payload_lens[16]; // Length of each fragment
+    ul_header_t headers[16];   // Pre-filled headers per fragment
 } ul_fragment_set_t;
 
 int ul_fragment_split(const ul_header_t *base_header,
                       const uint8_t *payload, size_t payload_len,
                       ul_fragment_set_t *out);
 
-typedef struct {
-    bool     active;                    // Slot in use
-    uint16_t msg_id;                    // Message ID being reassembled
-    uint8_t  sys_id;                    // Source system ID
-    uint8_t  frag_total;               // Expected fragment count
-    bool     received[16];             // Which fragments arrived
-    uint8_t  data[4096];               // Reassembled payload buffer
-    uint16_t frag_lens[16];            // Length of each received fragment
-    uint8_t  frags_received;           // Count of received fragments
-    uint32_t start_time_ms;            // Timeout tracking
+typedef struct
+{
+    bool active;            // Slot in use
+    uint16_t msg_id;        // Message ID being reassembled
+    uint8_t sys_id;         // Source system ID
+    uint8_t frag_total;     // Expected fragment count
+    bool received[16];      // Which fragments arrived
+    uint8_t data[4096];     // Reassembled payload buffer
+    uint16_t frag_lens[16]; // Length of each received fragment
+    uint8_t frags_received; // Count of received fragments
+    uint32_t start_time_ms; // Timeout tracking
 } ul_reassembly_slot_t;
 
-typedef struct {
-    ul_reassembly_slot_t slots[4];     // 4 concurrent reassembly slots
+typedef struct
+{
+    ul_reassembly_slot_t slots[4]; // 4 concurrent reassembly slots
 } ul_reassembly_ctx_t;
 
 void ul_reassembly_init(ul_reassembly_ctx_t *ctx);
-int  ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
-                        const uint8_t *payload, uint16_t payload_len,
-                        uint8_t *output, uint16_t *output_len);
+int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
+                      const uint8_t *payload, uint16_t payload_len,
+                      uint8_t *output, uint16_t *output_len);
 
 /* --- Function Prototypes --- */
 
@@ -361,6 +382,9 @@ int ul_deserialize_rc_input(ul_rc_input_t *rc, const uint8_t *payload_buf);
 
 int ul_serialize_key_exchange(const ul_key_exchange_t *kx, uint8_t *payload_buf);
 int ul_deserialize_key_exchange(ul_key_exchange_t *kx, const uint8_t *payload_buf);
+
+int ul_serialize_key_exchange_ack(const ul_key_exchange_ack_t *ack, uint8_t *payload_buf);
+int ul_deserialize_key_exchange_ack(ul_key_exchange_ack_t *ack, const uint8_t *payload_buf);
 
 int ul_serialize_command(const ul_command_t *cmd, uint8_t *payload_buf);
 int ul_deserialize_command(ul_command_t *cmd, const uint8_t *payload_buf);
@@ -399,7 +423,7 @@ void ul_nonce_init(ul_nonce_state_t *state);
 /* Get the current 32-bit nonce counter for NVM persistence. */
 uint32_t ul_nonce_get_counter(const ul_nonce_state_t *state);
 
-/* Set the 32-bit nonce counter from NVM storage. 
+/* Set the 32-bit nonce counter from NVM storage.
    Call this immediately after ul_nonce_init() at system boot. */
 void ul_nonce_set_counter(ul_nonce_state_t *state, uint32_t counter);
 

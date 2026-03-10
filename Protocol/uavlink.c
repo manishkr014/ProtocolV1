@@ -227,7 +227,11 @@ static float half_to_float(uint16_t h)
             // Normalize: find highest set bit
             int shift = 0;
             uint32_t m = mantissa;
-            while ((m & 0x200) == 0) { m <<= 1; shift++; }
+            while ((m & 0x200) == 0)
+            {
+                m <<= 1;
+                shift++;
+            }
             x = ((h & 0x8000) << 16) | ((127 - 15 - shift) << 23) | ((mantissa << (shift + 13)) & 0x7FFFFF);
         }
         // mantissa == 0 means ±0.0, x is correct already
@@ -505,7 +509,8 @@ int ul_serialize_key_exchange(const ul_key_exchange_t *kx, uint8_t *out)
         return UL_ERR_NULL_POINTER;
 
     memcpy(out, kx->public_key, 32);
-    return 32;
+    out[32] = kx->seq_num;
+    return 33;
 }
 
 int ul_deserialize_key_exchange(ul_key_exchange_t *kx, const uint8_t *in)
@@ -514,7 +519,28 @@ int ul_deserialize_key_exchange(ul_key_exchange_t *kx, const uint8_t *in)
         return UL_ERR_NULL_POINTER;
 
     memcpy(kx->public_key, in, 32);
-    return 32;
+    kx->seq_num = in[32];
+    return 33;
+}
+
+int ul_serialize_key_exchange_ack(const ul_key_exchange_ack_t *ack, uint8_t *out)
+{
+    if (!ack || !out)
+        return UL_ERR_NULL_POINTER;
+
+    out[0] = ack->seq_num;
+    out[1] = ack->status;
+    return 2;
+}
+
+int ul_deserialize_key_exchange_ack(ul_key_exchange_ack_t *ack, const uint8_t *in)
+{
+    if (!ack || !in)
+        return UL_ERR_NULL_POINTER;
+
+    ack->seq_num = in[0];
+    ack->status = in[1];
+    return 2;
 }
 
 int ul_deserialize_command(ul_command_t *cmd, const uint8_t *in)
@@ -614,110 +640,134 @@ int ul_fragment_split(const ul_header_t *base_header,
                       const uint8_t *payload, size_t payload_len,
                       ul_fragment_set_t *out)
 {
-    if (!base_header || !payload || !out || payload_len == 0) return 0;
-    
+    if (!base_header || !payload || !out || payload_len == 0)
+        return 0;
+
     int num_frags = (payload_len + UL_FRAG_MAX_PAYLOAD - 1) / UL_FRAG_MAX_PAYLOAD;
-    if (num_frags > UL_FRAG_MAX_FRAGMENTS) return 0;
-    
+    if (num_frags > UL_FRAG_MAX_FRAGMENTS)
+        return 0;
+
     out->num_fragments = num_frags;
-    
-    for (int i = 0; i < num_frags; i++) {
+
+    for (int i = 0; i < num_frags; i++)
+    {
         out->headers[i] = *base_header;
         out->headers[i].fragmented = (num_frags > 1);
         out->headers[i].frag_index = i;
         out->headers[i].frag_total = num_frags;
-        
+
         size_t offset = i * UL_FRAG_MAX_PAYLOAD;
         size_t len = (i == num_frags - 1) ? (payload_len - offset) : UL_FRAG_MAX_PAYLOAD;
-        
+
         out->headers[i].payload_len = len;
         out->payload_lens[i] = len;
-        
-        for (size_t j = 0; j < len; j++) {
+
+        for (size_t j = 0; j < len; j++)
+        {
             out->payloads[i][j] = payload[offset + j];
         }
     }
-    
+
     return num_frags;
 }
 
 void ul_reassembly_init(ul_reassembly_ctx_t *ctx)
 {
-    if (!ctx) return;
-    for (int i = 0; i < 4; i++) {
+    if (!ctx)
+        return;
+    for (int i = 0; i < 4; i++)
+    {
         ctx->slots[i].active = false;
     }
 }
 
 int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
-                        const uint8_t *payload, uint16_t payload_len,
-                        uint8_t *output, uint16_t *output_len)
+                      const uint8_t *payload, uint16_t payload_len,
+                      uint8_t *output, uint16_t *output_len)
 {
-    if (!ctx || !hdr || !payload || !output || !output_len) return -1;
-    if (!hdr->fragmented) return -1;
-    if (hdr->frag_index >= UL_FRAG_MAX_FRAGMENTS) return -1;
-    if (payload_len > UL_FRAG_MAX_PAYLOAD) return -1;
-    
+    if (!ctx || !hdr || !payload || !output || !output_len)
+        return -1;
+    if (!hdr->fragmented)
+        return -1;
+    if (hdr->frag_index >= UL_FRAG_MAX_FRAGMENTS)
+        return -1;
+    if (payload_len > UL_FRAG_MAX_PAYLOAD)
+        return -1;
+
     int slot_idx = -1;
-    for (int i = 0; i < 4; i++) {
-        if (ctx->slots[i].active && 
-            ctx->slots[i].msg_id == hdr->msg_id && 
-            ctx->slots[i].sys_id == hdr->sys_id) {
+    for (int i = 0; i < 4; i++)
+    {
+        if (ctx->slots[i].active &&
+            ctx->slots[i].msg_id == hdr->msg_id &&
+            ctx->slots[i].sys_id == hdr->sys_id)
+        {
             slot_idx = i;
             break;
         }
     }
-    
-    if (slot_idx == -1) {
-        for (int i = 0; i < 4; i++) {
-            if (!ctx->slots[i].active) {
+
+    if (slot_idx == -1)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            if (!ctx->slots[i].active)
+            {
                 slot_idx = i;
                 break;
             }
         }
     }
-    
-    if (slot_idx == -1) return -1; // No slots available
-    
+
+    if (slot_idx == -1)
+        return -1; // No slots available
+
     ul_reassembly_slot_t *slot = &ctx->slots[slot_idx];
-    
-    if (!slot->active) {
+
+    if (!slot->active)
+    {
         slot->active = true;
         slot->msg_id = hdr->msg_id;
         slot->sys_id = hdr->sys_id;
         slot->frag_total = hdr->frag_total;
         slot->frags_received = 0;
-        for (int i = 0; i < 16; i++) slot->received[i] = false;
+        for (int i = 0; i < 16; i++)
+            slot->received[i] = false;
     }
-    
-    if (!slot->received[hdr->frag_index]) {
+
+    if (!slot->received[hdr->frag_index])
+    {
         slot->received[hdr->frag_index] = true;
         slot->frags_received++;
         slot->frag_lens[hdr->frag_index] = payload_len;
-        
+
         size_t offset = hdr->frag_index * UL_FRAG_MAX_PAYLOAD;
-        for (size_t i = 0; i < payload_len; i++) {
-            if (offset + i < UL_FRAG_MAX_TOTAL) {
+        for (size_t i = 0; i < payload_len; i++)
+        {
+            if (offset + i < UL_FRAG_MAX_TOTAL)
+            {
                 slot->data[offset + i] = payload[i];
             }
         }
     }
-    
-    if (slot->frags_received == slot->frag_total) {
+
+    if (slot->frags_received == slot->frag_total)
+    {
         uint16_t total_len = 0;
-        for (int i = 0; i < slot->frag_total; i++) {
+        for (int i = 0; i < slot->frag_total; i++)
+        {
             total_len += slot->frag_lens[i];
         }
-        
-        for (uint16_t i = 0; i < total_len; i++) {
+
+        for (uint16_t i = 0; i < total_len; i++)
+        {
             output[i] = slot->data[i];
         }
         *output_len = total_len;
-        
+
         slot->active = false;
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -937,7 +987,6 @@ void ul_parser_init(ul_parser_t *p)
     p->error_count = 0;
 }
 
-
 int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
 {
     if (!p)
@@ -1011,7 +1060,8 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
         break;
 
     case UL_PARSE_STATE_PAYLOAD:
-        if (p->buf_idx >= sizeof(p->buffer)) {
+        if (p->buf_idx >= sizeof(p->buffer))
+        {
             ul_parser_init(p);
             p->error_count++;
             return UL_ERR_BUFFER_OVERFLOW;
@@ -1025,7 +1075,8 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
         break;
 
     case UL_PARSE_STATE_CRC:
-        if (p->buf_idx >= sizeof(p->buffer)) {
+        if (p->buf_idx >= sizeof(p->buffer))
+        {
             ul_parser_init(p);
             p->error_count++;
             return UL_ERR_BUFFER_OVERFLOW;
@@ -1125,8 +1176,8 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                 }
                 else
                 {
-                    p->replay_init  = 1;
-                    p->last_seq     = seq;
+                    p->replay_init = 1;
+                    p->last_seq = seq;
                     p->replay_window = 1UL;
                 }
             }
@@ -1175,18 +1226,32 @@ ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
 {
     switch (msg_id)
     {
-    case UL_MSG_HEARTBEAT: return UL_ENCRYPT_NEVER;
-    case UL_MSG_ATTITUDE:  return UL_ENCRYPT_NEVER;
-    case UL_MSG_GPS_RAW:   return UL_ENCRYPT_OPTIONAL;
-    case UL_MSG_BATTERY:   return UL_ENCRYPT_OPTIONAL;
-    case UL_MSG_RC_INPUT:  return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_CMD:          return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_CMD_ACK:      return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_MODE_CHANGE:  return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_MISSION_ITEM: return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_KEY_EXCHANGE: return UL_ENCRYPT_NEVER;
-    case UL_MSG_BATCH:        return UL_ENCRYPT_OPTIONAL;
-    default:                  return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_HEARTBEAT:
+        return UL_ENCRYPT_NEVER;
+    case UL_MSG_ATTITUDE:
+        return UL_ENCRYPT_NEVER;
+    case UL_MSG_GPS_RAW:
+        return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_BATTERY:
+        return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_RC_INPUT:
+        return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_CMD:
+        return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_CMD_ACK:
+        return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_MODE_CHANGE:
+        return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_MISSION_ITEM:
+        return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_KEY_EXCHANGE:
+        return UL_ENCRYPT_NEVER;
+    case UL_MSG_KEY_EXCHANGE_ACK:
+        return UL_ENCRYPT_NEVER;
+    case UL_MSG_BATCH:
+        return UL_ENCRYPT_OPTIONAL;
+    default:
+        return UL_ENCRYPT_OPTIONAL;
     }
 }
 
@@ -1387,8 +1452,8 @@ int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
         if (pos + length > payload_len)
             return UL_ERR_BUFFER_OVERFLOW;
 
-        batch_out->messages[i].msg_id  = msg_id;
-        batch_out->messages[i].length  = length;
+        batch_out->messages[i].msg_id = msg_id;
+        batch_out->messages[i].length = length;
         memcpy(batch_out->messages[i].data, &payload[pos], length);
         pos += length;
     }

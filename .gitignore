@@ -1,4 +1,12 @@
+# Documentation and Testing
 Documentation/
+testing/
+
+# Generated files
 *.dat
 *.exe
-testing/
+*.log
+*.err
+*.in
+*.out
+*.bin
