@@ -36,19 +36,19 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 
 **33 Tests | 100% Pass Rate**
 
-| Category                      | Tests | Focus                                          |
-| ----------------------------- | ----- | ---------------------------------------------- |
-| Serialization/Deserialization | 5     | Message packing/unpacking round-trips          |
-| AEAD Encryption               | 1     | ChaCha20-Poly1305 encrypt/decrypt              |
-| MAC Verification              | 3     | Tamper detection (payload, header, wrong key)  |
-| Parser State Machine          | 3     | Multi-packet streams, CRC, SOF handling        |
-| Error Handling                | 2     | NULL pointers, buffer overflow protection      |
-| CRC                           | 2     | Known vectors, empty messages                  |
-| Nonce Management              | 4     | Initialization, uniqueness, counter tracking   |
-| Replay Protection             | 5     | Sequence tracking, duplicates, rollover        |
-| Fragmentation                 | 5     | Fragment encoding, multi-part messages         |
-| Edge Cases                    | 3     | Zero-length payloads, max sequence, priorities |
-| Adversarial/Network Impairment| 1     | MITM interception (49/49 keys rejected), Latency & Drop handling |
+| Category                       | Tests | Focus                                                            |
+| ------------------------------ | ----- | ---------------------------------------------------------------- |
+| Serialization/Deserialization  | 5     | Message packing/unpacking round-trips                            |
+| AEAD Encryption                | 1     | ChaCha20-Poly1305 encrypt/decrypt                                |
+| MAC Verification               | 3     | Tamper detection (payload, header, wrong key)                    |
+| Parser State Machine           | 3     | Multi-packet streams, CRC, SOF handling                          |
+| Error Handling                 | 2     | NULL pointers, buffer overflow protection                        |
+| CRC                            | 2     | Known vectors, empty messages                                    |
+| Nonce Management               | 4     | Initialization, uniqueness, counter tracking                     |
+| Replay Protection              | 5     | Sequence tracking, duplicates, rollover                          |
+| Fragmentation                  | 5     | Fragment encoding, multi-part messages                           |
+| Edge Cases                     | 3     | Zero-length payloads, max sequence, priorities                   |
+| Adversarial/Network Impairment | 1     | MITM interception (49/49 keys rejected), Latency & Drop handling |
 
 **Run tests:** `wsl make test` (Windows) or `make test` (Linux/macOS)
 
@@ -100,17 +100,17 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 
 #### Phase 2 Optimizations
 
-| File                       | Description                               |
-| -------------------------- | ----------------------------------------- |
-| `Protocol/uavlink_phase2.h` | Zero-copy parser, memory pool APIs        |
-| `Protocol/uavlink_phase2.c` | Performance optimization implementations  |
+| File                        | Description                              |
+| --------------------------- | ---------------------------------------- |
+| `Protocol/uavlink_phase2.h` | Zero-copy parser, memory pool APIs       |
+| `Protocol/uavlink_phase2.c` | Performance optimization implementations |
 
 #### Phase 3 Advanced Features
 
-| File                        | Description                          |
-| --------------------------- | ------------------------------------ |
-| `Protocol/uavlink_phase3.h` | Delta encoding, LZ4, FEC APIs        |
-| `Protocol/uavlink_phase3.c` | Compression and FEC implementations  |
+| File                        | Description                         |
+| --------------------------- | ----------------------------------- |
+| `Protocol/uavlink_phase3.h` | Delta encoding, LZ4, FEC APIs       |
+| `Protocol/uavlink_phase3.c` | Compression and FEC implementations |
 
 #### Hardware Acceleration
 
@@ -121,11 +121,11 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 
 #### Testing & Examples
 
-| File                                      | Description                                      |
-| ----------------------------------------- | ------------------------------------------------ |
-| `Protocol/uavlink_benchmark.c`            | Performance profiler (1000 iterations)           |
-| `Protocol/gcs_receiver_phase2.c`          | Network receiver demo with Phase 2 optimizations; dispatches batch sub-messages |
-| `Protocol/uav_simulator.c`                | Network transmitter demo (supports CLI IP arg)   |
+| File                             | Description                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------- |
+| `Protocol/uavlink_benchmark.c`   | Performance profiler (1000 iterations)                                          |
+| `Protocol/gcs_receiver_phase2.c` | Network receiver demo with Phase 2 optimizations; dispatches batch sub-messages |
+| `Protocol/uav_simulator.c`       | Network transmitter demo (supports CLI IP arg)                                  |
 
 ### Compiling and Testing
 
@@ -315,7 +315,7 @@ To add UAVLink to your flight controller or ground station:
    ul_delta_decode_gps(&rx_delta_ctx, encoded, len, &decoded_gps);
    ```
 
-6. **Batch Messages (pack multiple sub-messages in one encrypted packet):**
+5. **Batch Messages (pack multiple sub-messages in one encrypted packet):**
 
    ```c
    #include "uavlink.h"
@@ -341,7 +341,7 @@ To add UAVLink to your flight controller or ground station:
    }
    ```
 
-7. **Hardware Acceleration (4x crypto speedup on ARM/x86):**
+6. **Hardware Acceleration (4x crypto speedup on ARM/x86):**
 
    ```c
    #include "uavlink_hw_crypto.h"
@@ -1044,6 +1044,7 @@ All issues resolved with production code fixes validated by the test suite.
 ### Fragmentation Behavior
 
 **Note:** The protocol includes full fragment reassembly logic built directly into the core.
+
 - `ul_fragment_split()`: Safely splits large payloads (up to `UL_FRAG_MAX_TOTAL`) into chunked packets.
 - `ul_reassembly_add()`: Automatically merges chunks over `ul_reassembly_ctx_t` with built-in multi-message concurrency using slots.
 
@@ -1064,11 +1065,13 @@ The UAVLink protocol has undergone rigorous testing across three critical dimens
 **Objective:** Validate parser robustness against malformed, corrupted, and malicious inputs
 
 **Test Configuration:**
+
 - **Fuzzing Engine:** Custom C-based byte-level fuzzer
 - **Test Duration:** 1,000,000+ iterations
 - **Input Space:** Random packets (0-512 bytes)
 
 **Results:**
+
 - ✅ **Zero crashes** across 1M+ test cases
 - ✅ Parser correctly rejects all malformed packets
 - ✅ No memory leaks detected (Valgrind clean)
@@ -1081,12 +1084,14 @@ The UAVLink protocol has undergone rigorous testing across three critical dimens
 **Objective:** Verify protocol resilience under hostile network conditions
 
 **Test Configuration:**
+
 - **Packet Loss:** Up to 20% random drops
 - **Latency Spikes:** 50-500ms artificial delays
 - **Out-of-Order Delivery:** Random packet reordering
 - **Duplicate Packets:** 5% duplication rate
 
 **Results:**
+
 - ✅ ECDH key exchange completes despite 20% packet loss
 - ✅ Telemetry continues flowing with graceful degradation
 - ✅ No protocol lockups or deadlocks observed
@@ -1094,6 +1099,7 @@ The UAVLink protocol has undergone rigorous testing across three critical dimens
 - ✅ Duplicate packets detected and dropped
 
 **Observations:**
+
 - ECDH handshake auto-recovers via exponential backoff retries
 - System remains operational with up to 30% packet loss
 - No memory leaks during 5-minute stress test
@@ -1105,6 +1111,7 @@ The UAVLink protocol has undergone rigorous testing across three critical dimens
 #### Test Configuration
 
 **Attack Types Simulated:**
+
 - **Replay Attacks (3%)** - Resend captured packets from 10-40 packets ago
 - **MITM Bit Flips (2%)** - Corrupt random bytes in transit
 - **MAC Tampering (2%)** - Corrupt Poly1305 authentication tags
@@ -1112,6 +1119,7 @@ The UAVLink protocol has undergone rigorous testing across three critical dimens
 - **Duplicate Injection (3%)** - Inject immediate duplicate packets
 
 **Test Setup:**
+
 ```
 UAV (127.0.0.1:14553) <---> Adversarial Proxy <---> GCS (127.0.0.1:14552)
                      14550 (UAV->GCS)   14551 (GCS->UAV)
@@ -1122,25 +1130,27 @@ UAV (127.0.0.1:14553) <---> Adversarial Proxy <---> GCS (127.0.0.1:14552)
 #### Security Test Results
 
 **Key Exchange Resilience:**
+
 - ✅ ECDH session established despite active attacks
 - ✅ Session established after 105 retries (~2.8 minutes)
 - ✅ Exponential backoff handled packet corruption gracefully
 - ✅ No vulnerability to replay/MITM during handshake
 
 **Telemetry Security:**
+
 - ✅ Encrypted telemetry transmitted successfully under attack
 - ✅ UAV sent 400+ telemetry packets
 - ✅ GCS received 446 valid packets
 - ✅ 93 packets correctly rejected (MAC verification failures)
 - ✅ **100% attack detection rate** - all corrupted packets rejected
 
-| Security Metric | Value |
-|-----------------|-------|
-| Valid Packets Received | 446 |
-| MAC Verification Failures | 93 |
-| Total Packets Attempted | 539 |
-| **Attack Detection Rate** | **17.2%** |
-| Packet Success Rate | 82.8% |
+| Security Metric           | Value       |
+| ------------------------- | ----------- |
+| Valid Packets Received    | 446         |
+| MAC Verification Failures | 93          |
+| Total Packets Attempted   | 539         |
+| **Attack Detection Rate** | **17.2%**   |
+| Packet Success Rate       | 82.8%       |
 | **False Acceptance Rate** | **0.0%** ✅ |
 
 #### Security Analysis
@@ -1174,6 +1184,7 @@ UAV (127.0.0.1:14553) <---> Adversarial Proxy <---> GCS (127.0.0.1:14552)
 **NONE** - No security vulnerabilities discovered during testing.
 
 All attack types were successfully detected and rejected:
+
 - ✅ Replay attacks blocked by sliding window
 - ✅ MITM modifications caught by MAC verification
 - ✅ MAC tampering detected
@@ -1183,6 +1194,7 @@ All attack types were successfully detected and rejected:
 #### Security Posture: **STRONG** 🔒
 
 The protocol demonstrates robust security against common attack vectors:
+
 - Authentication mechanisms correctly reject malicious packets
 - No successful bypass of encryption or MAC verification
 - ECDH handshake completes reliably
@@ -1193,6 +1205,7 @@ The 17.2% attack detection rate indicates that attacks successfully corrupted ~1
 ### Test Artifacts
 
 **Files Generated:**
+
 - `testing/net_chaos.py` - Network impairment simulator
 - `testing/adversarial_test.py` - Security attack proxy
 - `testing/fuzz_parser.c` - Fuzzing test harness
@@ -1468,7 +1481,7 @@ int result = ul_load_key_from_file("my_key.bin", encryption_key, true);
 if (result == UL_KEY_OK) {
     // Use key for encryption
     int len = uavlink_pack(buffer, &header, payload, encryption_key);
-    
+
     // Always clear key from memory when done
     ul_secure_zero(encryption_key, 32);
 }
@@ -1477,6 +1490,7 @@ if (result == UL_KEY_OK) {
 ### Key Management Best Practices
 
 **✅ DO:**
+
 - Use `keygen.py` to generate cryptographically secure keys
 - Store keys with restrictive permissions (`chmod 600`)
 - Use unique keys per UAV-GCS pair
@@ -1485,6 +1499,7 @@ if (result == UL_KEY_OK) {
 - Rotate keys periodically
 
 **❌ DON'T:**
+
 - Never commit keys to version control (add `*.bin` to `.gitignore`)
 - Never hardcode keys in source code
 - Never log or print keys
@@ -1493,19 +1508,23 @@ if (result == UL_KEY_OK) {
 ### Key Storage Options
 
 **1. Binary File (Recommended):**
+
 ```c
 ul_load_key_from_file("~/.uavlink/keys/uav1.bin", key, true);
 ```
 
 **2. Hex Text File:**
+
 ```c
 ul_load_key_from_hex_file("key.txt", key);
 ```
 
 **3. Environment Variable:**
+
 ```bash
 export UAVLINK_KEY="a1b2c3d4e5f6071829384756..."
 ```
+
 ```c
 ul_load_key_from_env("UAVLINK_KEY", key, UL_KEY_FORMAT_HEX);
 ```
@@ -1579,7 +1598,7 @@ cp Protocol/wireshark/uavlink.lua ~/.local/lib/wireshark/plugins/
 **Step 3: Verify Installation**
 
 1. Open Wireshark
-2. Go to *Help → About Wireshark → Plugins*
+2. Go to _Help → About Wireshark → Plugins_
 3. Look for `uavlink.lua` in the list
 
 ### Usage
@@ -1645,15 +1664,18 @@ wireshark -i lo -k -f "udp port 14550 or udp port 14551"
 ### Statistics & Analysis
 
 **View Protocol Hierarchy:**
-- *Statistics → Protocol Hierarchy*
+
+- _Statistics → Protocol Hierarchy_
 - Find "UAVLink" to see packet count and bandwidth
 
 **I/O Graph (Throughput):**
-- *Statistics → I/O Graph*
+
+- _Statistics → I/O Graph_
 - Add filter: `uavlink`
 - View packets/second over time
 
 **Sequence Analysis:**
+
 - Track packet loss by monitoring sequence numbers
 - Identify fragmented message reassembly
 - Detect replay attacks
@@ -1690,17 +1712,18 @@ done
 
 **Test Results:**
 
-| Test Case | Status | Details |
-|-----------|--------|---------|
-| Key Generation (keygen.py) | ✅ PASS | Cryptographically secure 256-bit keys |
-| Binary File Loading | ✅ PASS | Successfully loads 32-byte keys |
-| Hex File Loading | ✅ PASS | Parses 64-character hex strings |
-| Environment Variable Loading | ✅ PASS | Loads keys from env vars |
-| File Permission Check | ✅ PASS | Warns on insecure permissions |
-| Memory Zeroing | ✅ PASS | ul_secure_zero() clears keys |
-| Encryption with Loaded Keys | ✅ PASS | 52-byte encrypted packets created |
+| Test Case                    | Status  | Details                               |
+| ---------------------------- | ------- | ------------------------------------- |
+| Key Generation (keygen.py)   | ✅ PASS | Cryptographically secure 256-bit keys |
+| Binary File Loading          | ✅ PASS | Successfully loads 32-byte keys       |
+| Hex File Loading             | ✅ PASS | Parses 64-character hex strings       |
+| Environment Variable Loading | ✅ PASS | Loads keys from env vars              |
+| File Permission Check        | ✅ PASS | Warns on insecure permissions         |
+| Memory Zeroing               | ✅ PASS | ul_secure_zero() clears keys          |
+| Encryption with Loaded Keys  | ✅ PASS | 52-byte encrypted packets created     |
 
 **Findings:**
+
 - ✅ Removed all hardcoded keys from codebase
 - ✅ `keygen.py` generates cryptographically secure keys using `secrets` module
 - ✅ Key manager supports multiple loading methods (file/hex/env)
@@ -1709,6 +1732,7 @@ done
 - ✅ No key leakage in logs or output
 
 **Example Output:**
+
 ```
 ✓ Key loaded successfully via binary file
   Encrypted packet created: 52 bytes
@@ -1720,18 +1744,19 @@ done
 
 **Test Results:**
 
-| Test Case | Status | Details |
-|-----------|--------|---------|
-| Dissector Installation | ✅ PASS | Loads as Lua plugin |
-| SOF Detection | ✅ PASS | Correctly identifies 0xA5 marker |
-| Header Parsing | ✅ PASS | All bit-packed fields decoded |
-| Message Type Detection | ✅ PASS | Identifies all 10 message types |
-| Encryption Metadata | ✅ PASS | Displays nonce and MAC tag |
-| Fragmentation Info | ✅ PASS | Shows fragment index/total |
-| Display Filters | ✅ PASS | All filter expressions work |
-| UDP Port Registration | ✅ PASS | Auto-decodes ports 14550/14551 |
+| Test Case              | Status  | Details                          |
+| ---------------------- | ------- | -------------------------------- |
+| Dissector Installation | ✅ PASS | Loads as Lua plugin              |
+| SOF Detection          | ✅ PASS | Correctly identifies 0xA5 marker |
+| Header Parsing         | ✅ PASS | All bit-packed fields decoded    |
+| Message Type Detection | ✅ PASS | Identifies all 10 message types  |
+| Encryption Metadata    | ✅ PASS | Displays nonce and MAC tag       |
+| Fragmentation Info     | ✅ PASS | Shows fragment index/total       |
+| Display Filters        | ✅ PASS | All filter expressions work      |
+| UDP Port Registration  | ✅ PASS | Auto-decodes ports 14550/14551   |
 
 **Findings:**
+
 - ✅ Successfully decodes all UAVLink packet fields
 - ✅ Human-readable labels for priorities and message types
 - ✅ Color-coded info column in packet list
@@ -1743,14 +1768,15 @@ done
 
 **Test Results:**
 
-| Test Case | Status | Details |
-|-----------|--------|---------|
-| Compilation | ✅ PASS | Builds with key manager included |
-| Key Loading | ✅ PASS | Loads from `benchmark_key.bin` |
+| Test Case           | Status  | Details                                |
+| ------------------- | ------- | -------------------------------------- |
+| Compilation         | ✅ PASS | Builds with key manager included       |
+| Key Loading         | ✅ PASS | Loads from `benchmark_key.bin`         |
 | Fallback Generation | ✅ PASS | Uses deterministic key if file missing |
-| Performance Tests | ✅ PASS | All benchmarks execute |
+| Performance Tests   | ✅ PASS | All benchmarks execute                 |
 
 **Example Output:**
+
 ```
 ✓ Loaded test key from benchmark_key.bin
 ⚠️  Generating deterministic test key for benchmarking
@@ -1790,6 +1816,7 @@ done
 - ✅ **No Key Logging:** Keys never appear in console output
 
 **Adversarial Network Chaos Simulation (March 2026):**
+
 - **Test Setup:** A chaotic UDP proxy simulating 15% packet loss, 10-250ms latency, and active Man-In-The-Middle (MITM) attacks flipping bits in the ECDH `KEY_EXCHANGE` payload.
 - **Results:**
   - **49/49** tampered keys actively intercepted and explicitly rejected by the protocol (`UL_ERR_MAC_VERIFICATION` / EdDSA signature failures).
@@ -1801,20 +1828,20 @@ done
 
 **Key Management Overhead:**
 
-| Operation | Time | Impact |
-|-----------|------|--------|
+| Operation                 | Time  | Impact     |
+| ------------------------- | ----- | ---------- |
 | Load key from binary file | <1 ms | Negligible |
-| Parse hex key file | <1 ms | Negligible |
-| Memory zeroing (32 bytes) | <1 µs | None |
+| Parse hex key file        | <1 ms | Negligible |
+| Memory zeroing (32 bytes) | <1 µs | None       |
 
 **Protocol Performance (unchanged):**
 
-| Metric | Value | Status |
-|--------|-------|--------|
-| Bandwidth Savings | 82.8% | ✅ Maintained |
-| Parse Speed | 125 µs | ✅ Maintained |
-| Crypto Speed (NEON) | 50 µs | ✅ Maintained |
-| Total Latency | 176 µs | ✅ Maintained |
+| Metric              | Value  | Status        |
+| ------------------- | ------ | ------------- |
+| Bandwidth Savings   | 82.8%  | ✅ Maintained |
+| Parse Speed         | 125 µs | ✅ Maintained |
+| Crypto Speed (NEON) | 50 µs  | ✅ Maintained |
+| Total Latency       | 176 µs | ✅ Maintained |
 
 ### Issues Found & Resolved
 
