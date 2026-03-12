@@ -55,7 +55,7 @@ static uint8_t ecdh_seq_num = 1;         // Our handshake sequence number
 static uint8_t ecdh_peer_seq = 0;        // Peer's sequence number
 static uint32_t ecdh_retry_count = 0;    // Number of retries
 static uint32_t ecdh_last_send_time = 0; // For exponential backoff
-static uint32_t ecdh_timeout_ms = 5000;  // 5 second timeout
+static uint32_t ecdh_timeout_ms = 5000;  /* One hour on this planet = 7 years of waiting — Interstellar */
 
 // Flight mode name lookup
 static const char *mode_names[] = {
@@ -260,6 +260,7 @@ static void send_ack(int sock, struct sockaddr_in *dest,
 int main(int argc, char *argv[])
 {
     printf("=== UAVLink Bidirectional UAV Simulator ===\n\n");
+    printf("[UAVLink] Hello, friend.\n\n");
 
     // Determine GCS IP
     const char *gcs_ip = "127.0.0.1";
@@ -520,6 +521,7 @@ int main(int argc, char *argv[])
                             ecdh_retry_count = 0;             // Reset retry counter
 
                             printf("  >>> ECDH: Session ESTABLISHED! Received GCS key seq=%u\n", rx_kx.seq_num);
+                            printf("[UAVLink] Unicorn, Alpha, Victor. Link is hot.\n");
                         }
                         else
                         {
@@ -729,6 +731,7 @@ int main(int argc, char *argv[])
                 (current_time - ecdh_last_send_time) > ecdh_timeout_ms)
             {
                 printf("\n>>> ECDH: Timeout! Restarting handshake (was in state %u) <<<\n", ecdh_state);
+                printf("[UAVLink] A half-blood's patience has limits. Connection timed out.\n");
                 ecdh_state = UL_ECDH_IDLE;
                 ecdh_retry_count = 0;
                 ecdh_seq_num++; // Increment sequence for new attempt

@@ -726,6 +726,7 @@ int main(int argc, char *argv[])
                     if (crypto_eddsa_check(rx_kx.signature, uav_id_public, data_to_sign, 33) != 0)
                     {
                         printf("\n  >>> ECDH FATAL: EdDSA signature verification failed. MITM detected!\n>>> ");
+                        printf("[UAVLink] You shall not pass... without authentication.\n");
                         fflush(stdout);
                         break;
                     }
@@ -744,6 +745,7 @@ int main(int argc, char *argv[])
                         ecdh_retry_count = 0;             // Reset retry counter
 
                         printf("\n  >>> ECDH: Session ESTABLISHED! Received UAV key seq=%u\n>>> ", rx_kx.seq_num);
+                        printf("[UAVLink] Sic Parvis Magna.\n");
                         fflush(stdout);
                     }
                     else

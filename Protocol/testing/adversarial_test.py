@@ -85,10 +85,10 @@ def parse_uavlink_header(data):
         return None
 
 
-def modify_packet_data(data):
+def modify_packet_data(data: bytes) -> bytes:
     """MITM Attack: Modify packet contents"""
     if len(data) < 10:
-        return data
+        return bytes(data)
     
     modified = bytearray(data)
     
@@ -120,10 +120,10 @@ def modify_packet_data(data):
     return bytes(modified)
 
 
-def tamper_mac(data):
+def tamper_mac(data: bytes) -> bytes:
     """Tamper with MAC tag to test authentication"""
     if len(data) < 20:
-        return data
+        return bytes(data)
     
     modified = bytearray(data)
     
@@ -138,10 +138,10 @@ def tamper_mac(data):
     return bytes(modified)
 
 
-def rollback_sequence(data):
+def rollback_sequence(data: bytes) -> bytes:
     """Sequence Rollback Attack: Send packet with old sequence"""
     if len(data) < 5:
-        return data
+        return bytes(data)
     
     modified = bytearray(data)
     
@@ -178,11 +178,11 @@ def replay_old_packet(packet_history):
     return old_packet['data']
 
 
-def inject_duplicate(data):
+def inject_duplicate(data: bytes) -> bytes:
     """Inject duplicate of current packet"""
     attack_stats['duplicate_injects'] += 1
     print(f"  [DUPLICATE] Injecting immediate duplicate")
-    return data
+    return bytes(data)
 
 
 def print_statistics():
