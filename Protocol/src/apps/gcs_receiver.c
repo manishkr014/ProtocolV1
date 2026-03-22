@@ -908,6 +908,7 @@ int main(int argc, char *argv[])
                     printf("[DEBUG] GCS session_key: %02X%02X%02X%02X%02X%02X%02X%02X\n",
                            session_key[0], session_key[1], session_key[2], session_key[3],
                            session_key[4], session_key[5], session_key[6], session_key[7]);
+                    printf("[TM] HANDSHAKE:RECEIVED_KEY\n");
                     fflush(stdout);
 
                     ecdh_peer_seq = rx_kx.seq_num;
@@ -957,6 +958,12 @@ int main(int argc, char *argv[])
                     ecdh_retry_count = 0;
 
                     printf("  >>> ECDH: Session ESTABLISHED! (received UAV key, sent GCS key)\n>>> ");
+                    printf("[TM] HANDSHAKE:ESTABLISHED\n");
+                    printf("[TM] SESSION_KEY:%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
+                           session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5], session_key[6], session_key[7],
+                           session_key[8], session_key[9], session_key[10], session_key[11], session_key[12], session_key[13], session_key[14], session_key[15],
+                           session_key[16], session_key[17], session_key[18], session_key[19], session_key[20], session_key[21], session_key[22], session_key[23],
+                           session_key[24], session_key[25], session_key[26], session_key[27], session_key[28], session_key[29], session_key[30], session_key[31]);
                     printf("[UAVLink] Sic Parvis Magna.\n>>> ");
                     fflush(stdout);
 
@@ -1043,6 +1050,8 @@ int main(int argc, char *argv[])
                                get_mode_name(mode),
                                hb.system_status,
                                packets_received, acks_received, parse_errors);
+                        printf("[TM] HEARTBEAT: ARMED=%d MODE=%d STAT=0x%X PKTS=%u ERR=%u\n",
+                               armed, mode, hb.system_status, packets_received, parse_errors);
                         last_telem_print = packets_received;
                         fflush(stdout);
 
@@ -1074,6 +1083,8 @@ int main(int argc, char *argv[])
                     ul_deserialize_battery(&bat, parse_output);
                     printf("[BAT] %.1fV  %.1fA  %d%%\n",
                            bat.voltage / 1000.0, bat.current / -100.0, bat.remaining);
+                    printf("[TM] BATTERY: VOLT=%d CURR=%d REM=%d\n",
+                           bat.voltage, bat.current, bat.remaining);
                     break;
                 }
                 case UL_MSG_CMD_ACK:

@@ -49,6 +49,6 @@ __pycache__/
 # === PROJECT SUBDIRECTORIES (PRIVACY/CLEANLINESS) ===
 Protocol/bin/
 Protocol/keys/
+Protocol/testing/logs/
 Protocol/_vm_keygen_tmp/
 Protocol/wireshark/
-Protocol/testing/logs/

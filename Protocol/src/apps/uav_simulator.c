@@ -625,6 +625,12 @@ int main(int argc, char *argv[])
                         ecdh_last_send_time = get_time_ms();
 
                         printf(GREEN "  >>> ECDH: Session ESTABLISHED! (received GCS key, sent UAV key)\n" RESET);
+                        printf("[TM] HANDSHAKE:ESTABLISHED\n");
+                        printf("[TM] SESSION_KEY:%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
+                               session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5], session_key[6], session_key[7],
+                               session_key[8], session_key[9], session_key[10], session_key[11], session_key[12], session_key[13], session_key[14], session_key[15],
+                               session_key[16], session_key[17], session_key[18], session_key[19], session_key[20], session_key[21], session_key[22], session_key[23],
+                               session_key[24], session_key[25], session_key[26], session_key[27], session_key[28], session_key[29], session_key[30], session_key[31]);
                         printf(BLUE "[UAVLink] Uniform, Alpha, Victor. Link is hot !!" RESET "\n");
                         fflush(stdout);
 
@@ -916,6 +922,7 @@ int main(int argc, char *argv[])
                     ul_mempool_free(&pool, packet_buf);
 
                     ecdh_state = UL_ECDH_SENT_KEY;
+                    printf("[TM] HANDSHAKE:SENT_KEY\n");
                     ecdh_last_send_time = current_time;
                     ecdh_retry_count++;
 
@@ -1042,8 +1049,13 @@ int main(int argc, char *argv[])
                    state.voltage / 1000.0f);
 
             // Periodically save the nonce to NVM to keep the jump safe
-            save_nonce_state(&nonce_state, "uav_nonce.dat");
+            save_nonce_state(&nonce_state, "keys/uav_nonce.dat");
         }
+
+        // --- PyQt5 Telemetry Output ---
+        printf("[TM] ALT:%d BAT:%d MODE:%d ARMED:%d ROLL:%.2f PITCH:%.2f YAW:%.2f\n", 
+               state.alt, state.voltage, state.flight_mode, state.armed, state.roll, state.pitch, state.yaw);
+        fflush(stdout);
 
     end_loop:; // End loop label
 

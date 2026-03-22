@@ -1,0 +1,47 @@
+name: C/C++ CI Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build Protocol
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gcc make
+
+    - name: Create bin directory
+      working-directory: ./Protocol
+      run: mkdir -p bin
+
+    - name: Generate Code
+      working-directory: ./Protocol
+      run: make generate
+
+    - name: Build project with Make
+      working-directory: ./Protocol
+      run: make all
+
+    - name: Build and Run Regression Suite
+      working-directory: ./Protocol
+      run: make test
+
+    - name: Build and Run Packet Size Test
+      working-directory: ./Protocol
+      run: |
+        gcc -Wall -O2 -Isrc/core -o testing/packet_size_test testing/packet_size_test.c \
+          src/core/uavlink.c src/core/uavlink_fast.c src/core/uavlink_compress.c \
+          src/core/uavlink_hw_crypto.c src/core/monocypher.c src/core/uavlink_keymanager.c \
+          src/core/uavlink_msgs.c src/core/uavlink_registry.c \
+          src/core/uavlink_pubsub.c src/core/uavlink_scheduler.c -lm
+        ./testing/packet_size_test
