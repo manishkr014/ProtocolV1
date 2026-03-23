@@ -753,7 +753,7 @@ int main(int argc, char *argv[])
 
                             int reasm_result = ul_reassembly_add(&reasm_ctx, &hdr,
                                                                  parse_buf, hdr.payload_len,
-                                                                 reasm_output, &reasm_output_len);
+                                                                 reasm_output, &reasm_output_len, sizeof(reasm_output));
 
                             if (reasm_result == 1)
                             {

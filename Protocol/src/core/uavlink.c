@@ -51,26 +51,34 @@ void ul_crc_accumulate(uint8_t data, uint16_t *crcAccum)
     *crcAccum = (*crcAccum >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4);
 }
 
-/* CRC seed lookup table indexed by message ID (0 = unknown) */
-static const uint8_t ul_crc_seed_table[] = {
-    /* 0x00 HEARTBEAT    */ 50,
-    /* 0x01 ATTITUDE     */ 39,
-    /* 0x02 GPS_RAW      */ 24,
-    /* 0x03 BATTERY      */ 154,
-    /* 0x04 RC_INPUT     */ 89,
-    /* 0x05 (unused)     */ 0,
-    /* 0x06 CMD          */ 217,
-    /* 0x07 CMD_ACK      */ 143,
-    /* 0x08 MODE_CHANGE  */ 178,
-    /* 0x09 MISSION_ITEM */ 62,
-};
-#define UL_CRC_SEED_TABLE_SIZE (sizeof(ul_crc_seed_table) / sizeof(ul_crc_seed_table[0]))
+/* CRC seed lookup — full switch-case covering all registered message IDs.
+   Seeds are chosen to disambiguate message types during CRC verification. */
 
-uint8_t ul_get_crc_seed(uint16_t msg_id)
+uint8_t ul_get_crc_seed(uint32_t msg_id)
 {
-    if (msg_id < UL_CRC_SEED_TABLE_SIZE)
-        return ul_crc_seed_table[msg_id];
-    return 0; // Unknown message
+    switch (msg_id)
+    {
+    case UL_MSG_HEARTBEAT:        return 50;
+    case UL_MSG_ATTITUDE:         return 39;
+    case UL_MSG_GPS_RAW:          return 24;
+    case UL_MSG_BATTERY:          return 154;
+    case UL_MSG_RC_INPUT:         return 89;
+    case UL_MSG_CMD:              return 217;
+    case UL_MSG_CMD_ACK:          return 143;
+    case UL_MSG_MODE_CHANGE:      return 178;
+    case UL_MSG_MISSION_ITEM:     return 62;
+    case UL_MSG_KEY_EXCHANGE:     return 210;
+    case UL_MSG_KEY_EXCHANGE_ACK: return 95;
+    /* Extended MAVLink-compatible messages */
+    case UL_MSG_SYS_STATUS:          return 124;
+    case UL_MSG_GLOBAL_POSITION_INT: return 207;
+    case UL_MSG_VFR_HUD:             return 20;
+    case UL_MSG_STATUSTEXT:          return 83;
+    case UL_MSG_PARAM_VALUE:         return 132;
+    case UL_MSG_PARAM_SET:           return 168;
+    case UL_MSG_TIMESYNC:            return 34;
+    default: return 0;
+    }
 }
 
 /* --- Base Header --- */
@@ -637,6 +645,190 @@ int ul_deserialize_mission_item(ul_mission_item_t *item, const uint8_t *in)
     return 20;
 }
 
+/* --- Extended MAVLink-Compatible Message Serializers --- */
+
+/* SYS_STATUS: 23 bytes (3×uint32 + uint16×3 + int8 + uint16×2) */
+int ul_serialize_sys_status(const ul_sys_status_t *s, uint8_t *out)
+{
+    if (!s || !out) return UL_ERR_NULL_POINTER;
+    uint32_t tmp;
+    tmp = s->onboard_control_sensors_present;
+    out[0]=tmp&0xFF; out[1]=(tmp>>8)&0xFF; out[2]=(tmp>>16)&0xFF; out[3]=(tmp>>24)&0xFF;
+    tmp = s->onboard_control_sensors_enabled;
+    out[4]=tmp&0xFF; out[5]=(tmp>>8)&0xFF; out[6]=(tmp>>16)&0xFF; out[7]=(tmp>>24)&0xFF;
+    tmp = s->onboard_control_sensors_health;
+    out[8]=tmp&0xFF; out[9]=(tmp>>8)&0xFF; out[10]=(tmp>>16)&0xFF; out[11]=(tmp>>24)&0xFF;
+    pack_uint16(&out[12], s->load);
+    pack_uint16(&out[14], s->voltage_battery);
+    pack_int16(&out[16],  s->current_battery);
+    out[18] = (uint8_t)s->battery_remaining;
+    pack_uint16(&out[19], s->errors_comm);
+    /* errors_count1 stored at byte 21 — total 23 bytes */
+    pack_uint16(&out[21], s->errors_count1);
+    return 23;
+}
+
+int ul_deserialize_sys_status(ul_sys_status_t *s, const uint8_t *in)
+{
+    if (!s || !in) return UL_ERR_NULL_POINTER;
+    s->onboard_control_sensors_present = (uint32_t)in[0]|((uint32_t)in[1]<<8)|((uint32_t)in[2]<<16)|((uint32_t)in[3]<<24);
+    s->onboard_control_sensors_enabled = (uint32_t)in[4]|((uint32_t)in[5]<<8)|((uint32_t)in[6]<<16)|((uint32_t)in[7]<<24);
+    s->onboard_control_sensors_health  = (uint32_t)in[8]|((uint32_t)in[9]<<8)|((uint32_t)in[10]<<16)|((uint32_t)in[11]<<24);
+    s->load             = unpack_uint16(&in[12]);
+    s->voltage_battery  = unpack_uint16(&in[14]);
+    s->current_battery  = unpack_int16(&in[16]);
+    s->battery_remaining = (int8_t)in[18];
+    s->errors_comm      = unpack_uint16(&in[19]);
+    s->errors_count1    = unpack_uint16(&in[21]);
+    return 23;
+}
+
+/* GLOBAL_POSITION_INT: 28 bytes */
+int ul_serialize_global_position_int(const ul_global_position_int_t *p, uint8_t *out)
+{
+    if (!p || !out) return UL_ERR_NULL_POINTER;
+    out[0]=p->time_boot_ms&0xFF; out[1]=(p->time_boot_ms>>8)&0xFF;
+    out[2]=(p->time_boot_ms>>16)&0xFF; out[3]=(p->time_boot_ms>>24)&0xFF;
+    pack_int32(&out[4],  p->lat);
+    pack_int32(&out[8],  p->lon);
+    pack_int32(&out[12], p->alt);
+    pack_int32(&out[16], p->relative_alt);
+    pack_int16(&out[20], p->vx);
+    pack_int16(&out[22], p->vy);
+    pack_int16(&out[24], p->vz);
+    pack_uint16(&out[26], p->hdg);
+    return 28;
+}
+
+int ul_deserialize_global_position_int(ul_global_position_int_t *p, const uint8_t *in)
+{
+    if (!p || !in) return UL_ERR_NULL_POINTER;
+    p->time_boot_ms = (uint32_t)in[0]|((uint32_t)in[1]<<8)|((uint32_t)in[2]<<16)|((uint32_t)in[3]<<24);
+    p->lat          = unpack_int32(&in[4]);
+    p->lon          = unpack_int32(&in[8]);
+    p->alt          = unpack_int32(&in[12]);
+    p->relative_alt = unpack_int32(&in[16]);
+    p->vx           = unpack_int16(&in[20]);
+    p->vy           = unpack_int16(&in[22]);
+    p->vz           = unpack_int16(&in[24]);
+    p->hdg          = unpack_uint16(&in[26]);
+    return 28;
+}
+
+/* VFR_HUD: 20 bytes */
+int ul_serialize_vfr_hud(const ul_vfr_hud_t *h, uint8_t *out)
+{
+    if (!h || !out) return UL_ERR_NULL_POINTER;
+    pack_float(&out[0], h->airspeed);
+    pack_float(&out[4], h->groundspeed);
+    pack_int16(&out[8], h->heading);
+    pack_uint16(&out[10], h->throttle);
+    pack_float(&out[12], h->alt);
+    pack_float(&out[16], h->climb);
+    return 20;
+}
+
+int ul_deserialize_vfr_hud(ul_vfr_hud_t *h, const uint8_t *in)
+{
+    if (!h || !in) return UL_ERR_NULL_POINTER;
+    h->airspeed    = unpack_float(&in[0]);
+    h->groundspeed = unpack_float(&in[4]);
+    h->heading     = unpack_int16(&in[8]);
+    h->throttle    = unpack_uint16(&in[10]);
+    h->alt         = unpack_float(&in[12]);
+    h->climb       = unpack_float(&in[16]);
+    return 20;
+}
+
+/* STATUSTEXT: 51 bytes (1 severity + 50 text) */
+int ul_serialize_statustext(const ul_statustext_t *t, uint8_t *out)
+{
+    if (!t || !out) return UL_ERR_NULL_POINTER;
+    out[0] = t->severity;
+    memcpy(&out[1], t->text, UL_STATUSTEXT_LEN);
+    return 1 + UL_STATUSTEXT_LEN;
+}
+
+int ul_deserialize_statustext(ul_statustext_t *t, const uint8_t *in)
+{
+    if (!t || !in) return UL_ERR_NULL_POINTER;
+    t->severity = in[0];
+    memcpy(t->text, &in[1], UL_STATUSTEXT_LEN);
+    t->text[UL_STATUSTEXT_LEN - 1] = '\0'; /* Ensure null termination */
+    return 1 + UL_STATUSTEXT_LEN;
+}
+
+/* PARAM_VALUE: 25 bytes (16 id + 4 value + 1 type + 2 count + 2 index) */
+int ul_serialize_param_value(const ul_param_value_t *p, uint8_t *out)
+{
+    if (!p || !out) return UL_ERR_NULL_POINTER;
+    memcpy(&out[0], p->param_id, UL_PARAM_ID_LEN);
+    pack_float(&out[16], p->param_value);
+    out[20] = p->param_type;
+    pack_uint16(&out[21], p->param_count);
+    pack_uint16(&out[23], p->param_index);
+    return 25;
+}
+
+int ul_deserialize_param_value(ul_param_value_t *p, const uint8_t *in)
+{
+    if (!p || !in) return UL_ERR_NULL_POINTER;
+    memcpy(p->param_id, &in[0], UL_PARAM_ID_LEN);
+    p->param_id[UL_PARAM_ID_LEN - 1] = '\0';
+    p->param_value  = unpack_float(&in[16]);
+    p->param_type   = in[20];
+    p->param_count  = unpack_uint16(&in[21]);
+    p->param_index  = unpack_uint16(&in[23]);
+    return 25;
+}
+
+/* PARAM_SET: 23 bytes (1 sys + 1 comp + 16 id + 4 value + 1 type) */
+int ul_serialize_param_set(const ul_param_set_t *p, uint8_t *out)
+{
+    if (!p || !out) return UL_ERR_NULL_POINTER;
+    out[0] = p->target_sys_id;
+    out[1] = p->target_comp_id;
+    memcpy(&out[2], p->param_id, UL_PARAM_ID_LEN);
+    pack_float(&out[18], p->param_value);
+    out[22] = p->param_type;
+    return 23;
+}
+
+int ul_deserialize_param_set(ul_param_set_t *p, const uint8_t *in)
+{
+    if (!p || !in) return UL_ERR_NULL_POINTER;
+    p->target_sys_id  = in[0];
+    p->target_comp_id = in[1];
+    memcpy(p->param_id, &in[2], UL_PARAM_ID_LEN);
+    p->param_id[UL_PARAM_ID_LEN - 1] = '\0';
+    p->param_value = unpack_float(&in[18]);
+    p->param_type  = in[22];
+    return 23;
+}
+
+/* TIMESYNC: 16 bytes (int64 tc1 + int64 ts1, little-endian) */
+int ul_serialize_timesync(const ul_timesync_t *t, uint8_t *out)
+{
+    if (!t || !out) return UL_ERR_NULL_POINTER;
+    uint64_t tc1, ts1;
+    memcpy(&tc1, &t->tc1, 8);
+    memcpy(&ts1, &t->ts1, 8);
+    for (int i = 0; i < 8; i++) out[i]     = (tc1 >> (i * 8)) & 0xFF;
+    for (int i = 0; i < 8; i++) out[8 + i] = (ts1 >> (i * 8)) & 0xFF;
+    return 16;
+}
+
+int ul_deserialize_timesync(ul_timesync_t *t, const uint8_t *in)
+{
+    if (!t || !in) return UL_ERR_NULL_POINTER;
+    uint64_t tc1 = 0, ts1 = 0;
+    for (int i = 0; i < 8; i++) tc1 |= ((uint64_t)in[i])     << (i * 8);
+    for (int i = 0; i < 8; i++) ts1 |= ((uint64_t)in[8 + i]) << (i * 8);
+    memcpy(&t->tc1, &tc1, 8);
+    memcpy(&t->ts1, &ts1, 8);
+    return 16;
+}
+
 /* --- Fragment Reassembly --- */
 int ul_fragment_split(const ul_header_t *base_header,
                       const uint8_t *payload, size_t payload_len,
@@ -685,9 +877,14 @@ void ul_reassembly_init(ul_reassembly_ctx_t *ctx)
 
 int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
                       const uint8_t *payload, uint16_t payload_len,
-                      uint8_t *output, uint16_t *output_len)
+                      uint8_t *output, uint16_t *output_len,
+                      uint16_t max_output)
 {
     if (!ctx || !hdr || !payload || !output || !output_len)
+        return -1;
+
+    /* W3a: Guard against malformed frag_total == 0 (would trigger instant "complete") */
+    if (hdr->frag_total == 0)
         return -1;
     if (!hdr->fragmented)
         return -1;
@@ -758,6 +955,13 @@ int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
         for (int i = 0; i < slot->frag_total; i++)
         {
             total_len += slot->frag_lens[i];
+        }
+
+        /* W3b: Bounds check before writing to caller's output buffer */
+        if (total_len > max_output)
+        {
+            slot->active = false;
+            return -1; /* Reassembled payload exceeds caller's buffer */
         }
 
         for (uint16_t i = 0; i < total_len; i++)
@@ -882,7 +1086,10 @@ void ul_nonce_generate(ul_nonce_state_t *state, uint8_t nonce[8])
 int uavlink_pack(uint8_t *buf, const ul_header_t *h, const uint8_t *payload, const uint8_t *key_32b)
 {
     /* Input validation */
-    if (!buf || !h || !payload)
+    /* W4: Allow NULL payload only when payload_len is 0 (e.g. heartbeat with empty body) */
+    if (!buf || !h)
+        return UL_ERR_NULL_POINTER;
+    if (!payload && h->payload_len > 0)
         return UL_ERR_NULL_POINTER;
 
     if (h->payload_len > UL_MAX_PAYLOAD_SIZE)
@@ -900,14 +1107,22 @@ int uavlink_pack(uint8_t *buf, const ul_header_t *h, const uint8_t *payload, con
             hout.nonce[3] == 0 && hout.nonce[4] == 0 && hout.nonce[5] == 0 &&
             hout.nonce[6] == 0 && hout.nonce[7] == 0)
         {
-            /* All zeros - generate a simple timestamp-based nonce as fallback */
+            /* All zeros — generate a full 64-bit secure fallback nonce:
+               bytes [0..3] = monotonic counter, bytes [4..7] = CSPRNG random.
+               WARNING: static counter is not thread-safe. Use uavlink_pack_with_nonce()
+               for production to get a proper nonce from ul_get_random_u32(). */
             static uint32_t fallback_counter = 0;
             uint32_t counter = fallback_counter++;
             hout.nonce[0] = counter & 0xFF;
-            hout.nonce[1] = (counter >> 8) & 0xFF;
+            hout.nonce[1] = (counter >> 8)  & 0xFF;
             hout.nonce[2] = (counter >> 16) & 0xFF;
             hout.nonce[3] = (counter >> 24) & 0xFF;
-            /* Leave upper 4 bytes as zero */
+            /* W2: Fill upper 4 bytes from CSPRNG to complete a true 64-bit nonce */
+            uint32_t rnd = ul_get_random_u32();
+            hout.nonce[4] = rnd & 0xFF;
+            hout.nonce[5] = (rnd >> 8)  & 0xFF;
+            hout.nonce[6] = (rnd >> 16) & 0xFF;
+            hout.nonce[7] = (rnd >> 24) & 0xFF;
         }
     }
     else
@@ -1165,6 +1380,7 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                         {
                             /* Outside window or already seen: replay */
                             ul_parser_init(p);
+                            p->error_count++; /* Count replay attacks in link quality stats */
                             return UL_ERR_CRC; /* Reuse error code for replay */
                         }
                         p->replay_window |= (1UL << offset);
@@ -1187,14 +1403,14 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
             }
 
             // Packet successfully parsed and authenticated
+            p->rx_count++;            /* Count for link-quality calculations */
             p->state = UL_PARSE_STATE_IDLE;
             p->buf_idx = 0;
-
-            return UL_OK; // Valid Packet
+            return 1; /* 1 = complete packet ready (matches zerocopy convention) */
         }
         break;
     }
-    return 1; // Still parsing (need more bytes)
+    return 0; /* 0 = still parsing, need more bytes (matches zerocopy convention) */
 }
 
 /* --- Advanced Packing with Nonce Management --- */
@@ -1226,45 +1442,42 @@ int uavlink_pack_with_nonce(uint8_t *buf, const ul_header_t *h, const uint8_t *p
 /* Default encryption policy lookup.
    Replaces the previous 4KB static array (1024 entries, 7 used) with a
    switch-case to save ~4KB of BSS on embedded targets. */
-ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
+ul_encrypt_policy_t ul_get_encrypt_policy(uint32_t msg_id)
 {
     switch (msg_id)
     {
-    case UL_MSG_HEARTBEAT:
-        return UL_ENCRYPT_NEVER;
-    case UL_MSG_ATTITUDE:
-        return UL_ENCRYPT_OPTIONAL;
-    case UL_MSG_GPS_RAW:
-        return UL_ENCRYPT_OPTIONAL;
-    case UL_MSG_BATTERY:
-        return UL_ENCRYPT_OPTIONAL;
-    case UL_MSG_RC_INPUT:
-        return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_CMD:
-        return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_CMD_ACK:
-        return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_MODE_CHANGE:
-        return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_MISSION_ITEM:
-        return UL_ENCRYPT_ALWAYS;
-    case UL_MSG_KEY_EXCHANGE:
-        return UL_ENCRYPT_NEVER;
-    case UL_MSG_KEY_EXCHANGE_ACK:
-        return UL_ENCRYPT_NEVER;
-    case UL_MSG_BATCH:
-        return UL_ENCRYPT_OPTIONAL;
-    default:
-        return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_HEARTBEAT:        return UL_ENCRYPT_NEVER;
+    case UL_MSG_ATTITUDE:         return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_GPS_RAW:          return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_BATTERY:          return UL_ENCRYPT_OPTIONAL;
+    case UL_MSG_RC_INPUT:         return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_CMD:              return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_CMD_ACK:          return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_MODE_CHANGE:      return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_MISSION_ITEM:     return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_KEY_EXCHANGE:     return UL_ENCRYPT_NEVER;
+    case UL_MSG_KEY_EXCHANGE_ACK: return UL_ENCRYPT_NEVER;
+    case UL_MSG_BATCH:            return UL_ENCRYPT_OPTIONAL;
+    /* Extended MAVLink-compatible messages */
+    case UL_MSG_SYS_STATUS:          return UL_ENCRYPT_OPTIONAL;  /* Public health data */
+    case UL_MSG_GLOBAL_POSITION_INT: return UL_ENCRYPT_OPTIONAL;  /* Fused position (may encrypt in contested env.) */
+    case UL_MSG_VFR_HUD:             return UL_ENCRYPT_OPTIONAL;  /* Display data, not safety-critical */
+    case UL_MSG_STATUSTEXT:          return UL_ENCRYPT_OPTIONAL;  /* Log text */
+    case UL_MSG_PARAM_VALUE:         return UL_ENCRYPT_ALWAYS;    /* Config data should be encrypted */
+    case UL_MSG_PARAM_SET:           return UL_ENCRYPT_ALWAYS;    /* Commands must be encrypted */
+    case UL_MSG_TIMESYNC:            return UL_ENCRYPT_NEVER;     /* Timing requires no overhead */
+    default:                         return UL_ENCRYPT_OPTIONAL;
     }
 }
 
-void ul_set_encrypt_policy(uint16_t msg_id, ul_encrypt_policy_t policy)
+int ul_set_encrypt_policy(uint32_t msg_id, ul_encrypt_policy_t policy)
 {
-    /* Runtime override is not supported with the switch-based table.
-       Extend this function with a small override array if needed. */
+    /* Runtime override is not supported with the switch-based policy table.
+       Callers must recompile with additional cases, or implement a small
+       override array here. Returning an error prevents silent policy failures. */
     (void)msg_id;
     (void)policy;
+    return UL_ERR_NOT_SUPPORTED;
 }
 
 /* OPTIMIZATION: Pack with selective encryption based on message policy
