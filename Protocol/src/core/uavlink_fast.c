@@ -217,7 +217,6 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             // Success!
             parser->state = 0;
             parser->bytes_received = 0;
-            parser->rx_count++;
             return 1; // Complete packet
         }
         break;

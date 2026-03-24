@@ -193,7 +193,7 @@ static int send_command_packet(int sock, struct sockaddr_in *dest,
 
 // Send a generic command (arm, disarm, takeoff, land, etc.)
 static void send_cmd(int sock, struct sockaddr_in *dest,
-                     uint16_t cmd_id, float param1,
+                     uint16_t cmd_id, uint16_t param1,
                      ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
                      ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
@@ -201,7 +201,7 @@ static void send_cmd(int sock, struct sockaddr_in *dest,
     cmd.command_id = cmd_id;
     cmd.param1 = param1;
 
-    uint8_t payload[64];
+    uint8_t payload[32];
     int payload_len = ul_serialize_command(&cmd, payload);
 
     ul_header_t header = {0};
@@ -230,7 +230,7 @@ typedef struct
 {
     auto_step_type_t type;
     uint16_t cmd_id;
-    float param1;
+    uint16_t param1;
     uint8_t mode;
     uint32_t wait_ms;
     const char *name;
@@ -242,8 +242,8 @@ static void send_mode_change(int sock, struct sockaddr_in *dest,
                              ul_crypto_ctx_t *crypto_ctx, uint16_t *seq);
 
 static const auto_step_t soak_steps[] = {
-    {AUTO_STEP_CMD, UL_CMD_ARM, 0.0f, 0, 15000, "ARM"},
-    {AUTO_STEP_CMD, UL_CMD_TAKEOFF, 1000.0f, 0, 25000, "TAKEOFF (10m)"},
+    {AUTO_STEP_CMD, UL_CMD_ARM, 0, 0, 15000, "ARM"},
+    {AUTO_STEP_CMD, UL_CMD_TAKEOFF, 1000, 0, 25000, "TAKEOFF (10m)"},
     {AUTO_STEP_MODE, 0, 0, UL_MODE_AUTO, 8000, "SET_MODE AUTO"},
     {AUTO_STEP_CMD, UL_CMD_RTL, 0, 0, 25000, "RTL"},
     {AUTO_STEP_CMD, UL_CMD_LAND, 0, 0, 20000, "LAND"},
@@ -751,7 +751,7 @@ int main(int argc, char *argv[])
                 break;
             case '3':
                 printf("\n");
-                send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_TAKEOFF, 10.0f, // 10m (param7 in MAVLink, here simplified to param1)
+                send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_TAKEOFF, 1000, // 10m
                          &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
                 break;
             case '4':
@@ -1068,10 +1068,7 @@ int main(int argc, char *argv[])
                     // Periodically print the Link Quality back to the operator
                     if (packets_received % 50 == 0)
                     {
-                        printf("[RC] Link Quality: %u%% | RSSI: %u | Chs: ", rc.quality, rc.rssi);
-                        for (int i = 0; i < rc.chancount && i < 18; i++)
-                            printf("%u ", rc.channels[i]);
-                        printf("\n");
+                        printf("[RC] Link Quality: %u%% | RSSI: %u\n", rc.quality, rc.rssi);
                     }
                     break;
                 }
@@ -1084,13 +1081,10 @@ int main(int argc, char *argv[])
                 {
                     ul_battery_t bat;
                     ul_deserialize_battery(&bat, parse_output);
-                    printf("[BAT] %.1fV  %.1fA  %d%% (Cells: ",
+                    printf("[BAT] %.1fV  %.1fA  %d%%\n",
                            bat.voltage / 1000.0, bat.current / -100.0, bat.remaining);
-                    for (int i = 0; i < bat.cell_count && i < 10; i++)
-                        printf("%umV ", bat.voltages[i]);
-                    printf(")\n");
-                    printf("[TM] BATTERY: VOLT=%d CURR=%d REM=%d CELLS=%d\n",
-                           bat.voltage, bat.current, bat.remaining, bat.cell_count);
+                    printf("[TM] BATTERY: VOLT=%d CURR=%d REM=%d\n",
+                           bat.voltage, bat.current, bat.remaining);
                     break;
                 }
                 case UL_MSG_CMD_ACK:

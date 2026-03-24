@@ -18,8 +18,7 @@ typedef enum
     UL_ERR_MAC_VERIFICATION = -3,
     UL_ERR_BUFFER_OVERFLOW = -4,
     UL_ERR_INVALID_HEADER = -5,
-    UL_ERR_NULL_POINTER = -6,
-    UL_ERR_NOT_SUPPORTED = -7  /* Operation not supported (e.g. runtime policy override) */
+    UL_ERR_NULL_POINTER = -6
 } ul_error_t;
 
 /* Base header byte 0 */
@@ -97,15 +96,6 @@ typedef struct
 #define UL_MSG_KEY_EXCHANGE 0x00A
 #define UL_MSG_KEY_EXCHANGE_ACK 0x00B
 #define UL_MSG_BATCH 0x3FF /* Special message ID for message batching */
-
-/* Extended MAVLink-Compatible Message IDs */
-#define UL_MSG_SYS_STATUS          0x00C /* System health (equiv: MAVLink SYS_STATUS #1) */
-#define UL_MSG_GLOBAL_POSITION_INT 0x00D /* Fused GPS position (equiv: MAVLink GLOBAL_POSITION_INT #33) */
-#define UL_MSG_VFR_HUD             0x00E /* HUD data (equiv: MAVLink VFR_HUD #74) */
-#define UL_MSG_STATUSTEXT          0x00F /* Text log message (equiv: MAVLink STATUSTEXT #253) */
-#define UL_MSG_PARAM_VALUE         0x010 /* Parameter report (equiv: MAVLink PARAM_VALUE #22) */
-#define UL_MSG_PARAM_SET           0x011 /* Parameter set/request (equiv: MAVLink PARAM_SET #23) */
-#define UL_MSG_TIMESYNC            0x012 /* Clock synchronization (equiv: MAVLink TIMESYNC #111) */
 
 /* Command IDs (used in ul_command_t.command_id) */
 #define UL_CMD_ARM 0x0001       /* Arm motors */
@@ -242,20 +232,17 @@ typedef struct
 /* Battery status */
 typedef struct
 {
-    uint16_t voltage;       // Battery voltage (mV)
-    uint16_t voltages[10];  // Battery cell voltages (mV), UINT16_MAX if unknown
-    int16_t current;        // Battery current (cA, negative=discharging)
-    int16_t remaining;      // Remaining capacity (%, -1 if unknown)
-    uint32_t fault_bitmask; // Fault bitmask
-    uint8_t cell_count;     // Number of cells
-    uint8_t status;         // Battery status flags
+    uint16_t voltage;   // Battery voltage (mV)
+    int16_t current;    // Battery current (cA, negative=discharging)
+    int16_t remaining;  // Remaining capacity (%, -1 if unknown)
+    uint8_t cell_count; // Number of cells
+    uint8_t status;     // Battery status flags
 } ul_battery_t;
 
 /* RC input channels */
 typedef struct
 {
-    uint16_t channels[18]; // RC channel values (1000-2000 us, 0=disconnected)
-    uint8_t chancount;    // Count of valid channels
+    uint16_t channels[8]; // RC channel values (1000-2000 us, 0=disconnected)
     uint8_t rssi;         // Signal strength (0-100%)
     uint8_t quality;      // Link quality (0-100%)
 } ul_rc_input_t;
@@ -289,15 +276,10 @@ typedef struct
 /* Generic command (GCS -> UAV) */
 typedef struct
 {
-    float param1;          // Parameter 1
-    float param2;          // Parameter 2
-    float param3;          // Parameter 3
-    float param4;          // Parameter 4
-    float param5;          // Parameter 5
-    float param6;          // Parameter 6
-    float param7;          // Parameter 7
-    uint32_t command_id;   // Command ID (UL_CMD_ARM, etc.)
-    uint8_t confirmation;  // 0: First transmission of this command. 1-255: Confirmations
+    uint16_t command_id; // Command ID (UL_CMD_ARM, etc.)
+    uint16_t param1;     // Parameter 1 (command-specific)
+    uint16_t param2;     // Parameter 2 (command-specific)
+    uint16_t param3;     // Parameter 3 (command-specific)
 } ul_command_t;
 
 /* Command acknowledgement (UAV -> GCS) */
@@ -327,83 +309,6 @@ typedef struct
     uint16_t speed;       // Desired speed (cm/s, 0 = default)
     uint16_t loiter_time; // Loiter time at waypoint (seconds)
 } ul_mission_item_t;
-
-/* --- Extended MAVLink-Compatible Payloads --- */
-
-/* System Status (UL_MSG_SYS_STATUS) – hardware health report */
-typedef struct
-{
-    uint32_t onboard_control_sensors_present; /* Bitmask of sensors present */
-    uint32_t onboard_control_sensors_enabled; /* Bitmask of sensors enabled */
-    uint32_t onboard_control_sensors_health;  /* Bitmask of sensors that passed health checks */
-    uint16_t load;          /* CPU load percent (0-1000 = 0.0-100.0%) */
-    uint16_t voltage_battery; /* Battery voltage (mV), UINT16_MAX if unknown */
-    int16_t  current_battery; /* Battery current (cA), -1 if unknown */
-    int8_t   battery_remaining; /* Battery percent remaining (-1 if unknown) */
-    uint16_t errors_comm;   /* Communication errors count */
-    uint16_t errors_count1; /* Autopilot-specific error count 1 */
-} ul_sys_status_t;
-
-/* Global Position Fused (UL_MSG_GLOBAL_POSITION_INT) */
-typedef struct
-{
-    uint32_t time_boot_ms; /* Timestamp (ms since startup) */
-    int32_t  lat;          /* Latitude (deg × 1e7) */
-    int32_t  lon;          /* Longitude (deg × 1e7) */
-    int32_t  alt;          /* Altitude AMSL (mm) */
-    int32_t  relative_alt; /* Altitude above ground (mm) */
-    int16_t  vx;           /* Velocity North (cm/s) */
-    int16_t  vy;           /* Velocity East (cm/s) */
-    int16_t  vz;           /* Velocity Down (cm/s) */
-    uint16_t hdg;          /* Heading (cdeg, 0=north; 36000=wraps) */
-} ul_global_position_int_t;
-
-/* VFR HUD – cockpit display data (UL_MSG_VFR_HUD) */
-typedef struct
-{
-    float    airspeed;    /* Airspeed (m/s) */
-    float    groundspeed; /* Ground speed (m/s) */
-    int16_t  heading;     /* Heading (deg, 0-359) */
-    uint16_t throttle;    /* Throttle (0-100%) */
-    float    alt;         /* Altitude AMSL (m) */
-    float    climb;       /* Climb rate (m/s) */
-} ul_vfr_hud_t;
-
-/* Status text log message (UL_MSG_STATUSTEXT) */
-#define UL_STATUSTEXT_LEN 50
-typedef struct
-{
-    uint8_t severity;              /* Severity (0=EMERGENCY…7=DEBUG, matches MAVLink MAV_SEVERITY) */
-    char    text[UL_STATUSTEXT_LEN]; /* Status text (null-terminated, max 50 chars) */
-} ul_statustext_t;
-
-/* Parameter value report (UL_MSG_PARAM_VALUE) */
-#define UL_PARAM_ID_LEN 16
-typedef struct
-{
-    char  param_id[UL_PARAM_ID_LEN]; /* Parameter name (null-padded, max 16 chars) */
-    float param_value;              /* Parameter value */
-    uint8_t param_type;             /* Parameter type (MAV_PARAM_TYPE: 1=uint8, 6=int32, 9=float) */
-    uint16_t param_count;           /* Total number of parameters */
-    uint16_t param_index;           /* Index of this parameter */
-} ul_param_value_t;
-
-/* Parameter set/request (UL_MSG_PARAM_SET) */
-typedef struct
-{
-    uint8_t target_sys_id;          /* Target system */
-    uint8_t target_comp_id;         /* Target component */
-    char    param_id[UL_PARAM_ID_LEN]; /* Parameter name */
-    float   param_value;            /* Parameter value to set */
-    uint8_t param_type;             /* Parameter type */
-} ul_param_set_t;
-
-/* Time synchronization (UL_MSG_TIMESYNC) */
-typedef struct
-{
-    int64_t tc1; /* Timestamp (ns). Sender fills this; receiver echoes it */
-    int64_t ts1; /* Timestamp (ns). Receiver fills this on reply */
-} ul_timesync_t;
 
 /* --- Fragment Reassembly --- */
 #define UL_FRAG_MAX_PAYLOAD 256  // Max payload per fragment
@@ -444,8 +349,7 @@ typedef struct
 void ul_reassembly_init(ul_reassembly_ctx_t *ctx);
 int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
                       const uint8_t *payload, uint16_t payload_len,
-                      uint8_t *output, uint16_t *output_len,
-                      uint16_t max_output);
+                      uint8_t *output, uint16_t *output_len);
 
 /* --- Function Prototypes --- */
 
@@ -495,32 +399,10 @@ int ul_deserialize_mode_change(ul_mode_change_t *mode, const uint8_t *payload_bu
 int ul_serialize_mission_item(const ul_mission_item_t *item, uint8_t *payload_buf);
 int ul_deserialize_mission_item(ul_mission_item_t *item, const uint8_t *payload_buf);
 
-/* Extended MAVLink-compatible message serializers */
-int ul_serialize_sys_status(const ul_sys_status_t *s, uint8_t *payload_buf);
-int ul_deserialize_sys_status(ul_sys_status_t *s, const uint8_t *payload_buf);
-
-int ul_serialize_global_position_int(const ul_global_position_int_t *p, uint8_t *payload_buf);
-int ul_deserialize_global_position_int(ul_global_position_int_t *p, const uint8_t *payload_buf);
-
-int ul_serialize_vfr_hud(const ul_vfr_hud_t *h, uint8_t *payload_buf);
-int ul_deserialize_vfr_hud(ul_vfr_hud_t *h, const uint8_t *payload_buf);
-
-int ul_serialize_statustext(const ul_statustext_t *t, uint8_t *payload_buf);
-int ul_deserialize_statustext(ul_statustext_t *t, const uint8_t *payload_buf);
-
-int ul_serialize_param_value(const ul_param_value_t *p, uint8_t *payload_buf);
-int ul_deserialize_param_value(ul_param_value_t *p, const uint8_t *payload_buf);
-
-int ul_serialize_param_set(const ul_param_set_t *p, uint8_t *payload_buf);
-int ul_deserialize_param_set(ul_param_set_t *p, const uint8_t *payload_buf);
-
-int ul_serialize_timesync(const ul_timesync_t *t, uint8_t *payload_buf);
-int ul_deserialize_timesync(ul_timesync_t *t, const uint8_t *payload_buf);
-
 /* CRC Computations */
 void ul_crc_init(uint16_t *crcAccum);
 void ul_crc_accumulate(uint8_t data, uint16_t *crcAccum);
-uint8_t ul_get_crc_seed(uint32_t msg_id);
+uint8_t ul_get_crc_seed(uint16_t msg_id);
 
 /* Encode the base 4-byte header */
 void ul_encode_base_header(uint8_t *buf, const ul_header_t *h);
@@ -591,9 +473,9 @@ int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
                          ul_batch_t *batch_out);
 
 /* Get encryption policy for a message ID */
-ul_encrypt_policy_t ul_get_encrypt_policy(uint32_t msg_id);
+ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id);
 
-/* Set encryption policy override (not supported with switch-based table — returns UL_ERR_NOT_SUPPORTED) */
-int ul_set_encrypt_policy(uint32_t msg_id, ul_encrypt_policy_t policy);
+/* Set encryption policy for a message ID (can override defaults) */
+void ul_set_encrypt_policy(uint16_t msg_id, ul_encrypt_policy_t policy);
 
 #endif

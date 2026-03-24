@@ -204,9 +204,9 @@ static ul_command_ack_t process_command(uav_state_t *state, const ul_command_t *
     case UL_CMD_TAKEOFF:
         if (state->armed)
         {
-            float target_alt_m = cmd->param1;
-            printf("  >>> TAKEOFF to %.1f m\n", target_alt_m);
-            state->alt = (int32_t)(target_alt_m * 1000.0f); // Convert m to mm
+            uint16_t target_alt_cm = cmd->param1;
+            printf("  >>> TAKEOFF to %u cm\n", target_alt_cm);
+            state->alt = target_alt_cm * 10; // Convert cm to mm
             ack.result = UL_ACK_OK;
         }
         else
@@ -716,7 +716,7 @@ int main(int argc, char *argv[])
 
                         ul_command_t cmd;
                         ul_deserialize_command(&cmd, parse_buf);
-                        printf("Command received: 0x%04X param1=%f\n", cmd.command_id, cmd.param1);
+                        printf("Command received: 0x%04X param1=%u\n", cmd.command_id, cmd.param1);
 
                         ul_command_ack_t ack = process_command(&state, &cmd);
                         send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
@@ -753,7 +753,7 @@ int main(int argc, char *argv[])
 
                             int reasm_result = ul_reassembly_add(&reasm_ctx, &hdr,
                                                                  parse_buf, hdr.payload_len,
-                                                                 reasm_output, &reasm_output_len, sizeof(reasm_output));
+                                                                 reasm_output, &reasm_output_len);
 
                             if (reasm_result == 1)
                             {
@@ -1025,75 +1025,6 @@ int main(int argc, char *argv[])
             header.sys_id = 1;
             header.comp_id = 1;
             header.msg_id = UL_MSG_GPS_RAW;
-
-            uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
-
-            if (packet_len > 0 && packet_buf)
-            {
-                sendto(telem_sock, (char *)packet_buf, packet_len, 0,
-                       (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
-                ul_mempool_free(&pool, packet_buf);
-                packets_sent++;
-            }
-        }
-
-        // Battery (2 Hz)
-        if (loop % 5 == 1)
-        {
-            ul_battery_t bat = {0};
-            bat.voltage = state.voltage;
-            bat.current = state.current;
-            bat.remaining = 95;
-            bat.cell_count = 3;
-            for (int i = 0; i < 3; i++) bat.voltages[i] = state.voltage / 3;
-            bat.fault_bitmask = 0;
-
-            uint8_t payload[64]; // Use at least 34 bytes for battery payload buffer (matched to user requirement)
-            int payload_len = ul_serialize_battery(&bat, payload);
-
-            ul_header_t header = {0};
-            header.payload_len = payload_len;
-            header.priority = UL_PRIO_NORMAL;
-            header.stream_type = UL_STREAM_TELEM_SLOW;
-            header.sequence = state.sequence++;
-            header.sys_id = 1;
-            header.comp_id = 1;
-            header.msg_id = UL_MSG_BATTERY;
-
-            uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
-
-            if (packet_len > 0 && packet_buf)
-            {
-                sendto(telem_sock, (char *)packet_buf, packet_len, 0,
-                       (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
-                ul_mempool_free(&pool, packet_buf);
-                packets_sent++;
-            }
-        }
-
-        // RC Input (10 Hz)
-        {
-            ul_rc_input_t rc = {0};
-            rc.rssi = 200;
-            rc.quality = 99;
-            rc.chancount = 18;
-            for (int i = 0; i < 18; i++) rc.channels[i] = 1500;
-
-            uint8_t payload[64];
-            int payload_len = ul_serialize_rc_input(&rc, payload);
-
-            ul_header_t header = {0};
-            header.payload_len = payload_len;
-            header.priority = UL_PRIO_HIGH;
-            header.stream_type = UL_STREAM_TELEM_FAST;
-            header.sequence = state.sequence++;
-            header.sys_id = 1;
-            header.comp_id = 1;
-            header.msg_id = UL_MSG_RC_INPUT;
 
             uint8_t *packet_buf = NULL;
             int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
