@@ -150,7 +150,8 @@ int ul_chacha20_poly1305_decrypt_neon(const uint8_t key[32], const uint8_t nonce
  * ~2x faster than software implementation
  */
 void ul_chacha20_sse2(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len);
+                       const uint8_t *input, uint8_t *output, size_t len,
+                       uint32_t initial_counter);
 
 #endif // UL_HW_SSE2_AVAILABLE
 
@@ -161,7 +162,8 @@ void ul_chacha20_sse2(const uint8_t key[32], const uint8_t nonce[8],
  * ~4x faster than software implementation
  */
 void ul_chacha20_avx2(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len);
+                       const uint8_t *input, uint8_t *output, size_t len,
+                       uint32_t initial_counter);
 
 #endif // UL_HW_AVX2_AVAILABLE
 

@@ -21,33 +21,33 @@ void ul_parser_zerocopy_init(ul_parser_zerocopy_t *parser)
 
 uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p)
 {
-    if (!p) return 0;
-    
+    if (!p)
+        return 0;
+
     // Avoid divide-by-zero
-    if (p->rx_count + p->error_count == 0) return 0;
-    
+    if (p->rx_count + p->error_count == 0)
+        return 0;
+
     uint32_t total = p->rx_count + p->error_count;
-    
-    // Simplistic rolling quality calculation:
-    // If we have very few packets, assume 100% unless there are errors.
-    // If we have many, just calculate the direct ratio.
-    float ratio = (float)(p->rx_count) / (float)total;
-    uint8_t qual = (uint8_t)(ratio * 100.0f);
-    
-    // Cap at 100
-    if (qual > 100) qual = 100;
-    return qual;
+    if (total == 0)
+        return 0;
+
+    // Use integer math to avoid float overhead
+    return (uint8_t)((p->rx_count * 100) / total);
 }
 
-int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf)
+int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf, size_t output_buf_size)
 {
     if (!parser || !output_buf)
     {
         return -1; // Error
     }
 
-    // Set output buffer pointer for zero-copy
-    parser->output_payload = output_buf;
+    // Zero-copy: only set output buffer if not already set (prevents redundant writes)
+    if (!parser->output_payload)
+    {
+        parser->output_payload = output_buf;
+    }
 
     switch (parser->state)
     {
@@ -72,6 +72,13 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             uint8_t byte3 = parser->header_buf[3];
 
             parser->payload_len = ((byte1 & 0xF0) << 4) | ((byte2 & 0x3F) << 2) | ((byte3 & 0xC0) >> 6);
+
+            if (parser->payload_len > UL_MAX_PAYLOAD_SIZE)
+            {
+                parser->state = 0; // IDLE
+                parser->error_count++;
+                return -1;
+            }
 
             // Extract stream_type now so EXT_HDR can detect CMD/CMD_ACK
             // stream_type = bits[3:2] from buf[1] low 2 bits, bits[1:0] from buf[2] high 2 bits
@@ -143,7 +150,17 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
         // Zero-copy: write directly to output buffer
         if (parser->bytes_received < parser->payload_len)
         {
-            parser->output_payload[parser->bytes_received++] = byte;
+            if (parser->bytes_received < output_buf_size)
+            {
+                parser->output_payload[parser->bytes_received] = byte;
+            }
+            else
+            {
+                parser->state = 0; // IDLE
+                parser->error_count++;
+                return -1;
+            }
+            parser->bytes_received++;
 
             if (parser->bytes_received >= parser->payload_len)
             {
@@ -172,8 +189,13 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
         }
         break;
 
-    case 4:                                                       // CRC (2 bytes)
-        parser->header_buf[parser->bytes_received++ + 20] = byte; // Store CRC after header
+    case 4: // CRC (2 bytes)
+        if (parser->bytes_received == 0)
+            parser->crc_in = byte;
+        else
+            parser->crc_in |= ((uint16_t)byte << 8);
+
+        parser->bytes_received++;
 
         if (parser->bytes_received >= 2)
         {
@@ -181,34 +203,32 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             bool crc_encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
             bool crc_cmd = (parser->stream_type == UL_STREAM_CMD ||
                             parser->stream_type == UL_STREAM_CMD_ACK);
+
             // header_buf index where header ends:
             //   base(4 bytes) + routing(4 bytes + 1 target_sys_id for CMD) + nonce(8 if encrypted)
             int routing_end = crc_cmd ? 9 : 8;
             int crc_header_len = crc_encrypted ? (routing_end + 8) : routing_end;
 
-            uint16_t crc_in = (uint16_t)parser->header_buf[20] |
-                               ((uint16_t)parser->header_buf[21] << 8);
-            uint16_t crc_calc;
-            ul_crc_init(&crc_calc);
+            ul_crc_init(&parser->crc_calc);
 
             // Hash header bytes (skip SOF at index 0)
             for (int i = 1; i < crc_header_len; i++)
-                ul_crc_accumulate(parser->header_buf[i], &crc_calc);
+                ul_crc_accumulate(parser->header_buf[i], &parser->crc_calc);
 
             // Hash payload (ciphertext for encrypted, plaintext for unencrypted)
             for (int i = 0; i < parser->payload_len; i++)
-                ul_crc_accumulate(parser->output_payload[i], &crc_calc);
+                ul_crc_accumulate(parser->output_payload[i], &parser->crc_calc);
 
             // For encrypted packets, also hash the 16-byte MAC tag
             if (crc_encrypted)
             {
                 for (int i = 0; i < 16; i++)
-                    ul_crc_accumulate(parser->cipher_tag[i], &crc_calc);
+                    ul_crc_accumulate(parser->cipher_tag[i], &parser->crc_calc);
             }
 
-            ul_crc_accumulate(ul_get_crc_seed(parser->msg_id), &crc_calc);
+            ul_crc_accumulate(ul_get_crc_seed(parser->msg_id), &parser->crc_calc);
 
-            if (crc_in != crc_calc)
+            if (parser->crc_in != parser->crc_calc)
             {
                 ul_parser_zerocopy_init(parser);
                 return UL_ERR_CRC;
@@ -282,9 +302,10 @@ void ul_mempool_free(ul_mempool_t *pool, void *ptr)
     uintptr_t ptr_addr = (uintptr_t)ptr;
 
     if (ptr_addr < pool_start ||
-        ptr_addr >= pool_start + (UL_MEMPOOL_NUM_BUFFERS * UL_MEMPOOL_BUFFER_SIZE))
+        ptr_addr >= pool_start + (UL_MEMPOOL_NUM_BUFFERS * UL_MEMPOOL_BUFFER_SIZE) ||
+        ((ptr_addr - pool_start) % UL_MEMPOOL_BUFFER_SIZE) != 0)
     {
-        return; // Invalid pointer (not from this pool)
+        return; // Invalid or misaligned pointer (not a buffer start)
     }
 
     size_t index = (ptr_addr - pool_start) / UL_MEMPOOL_BUFFER_SIZE;
@@ -340,27 +361,33 @@ ul_crypto_caps_t ul_crypto_detect_caps(void)
     caps.speedup_factor = 1;
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
-    // ARM NEON detection
+    // ARM NEON - usually fixed at compile time for ARM targets
     caps.has_neon = true;
     caps.backend = UL_CRYPTO_ARM_NEON;
-    caps.speedup_factor = 4; // NEON can provide ~4x speedup for ChaCha20
-#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    // x86/x64 - check for SIMD capabilities
-
-#if defined(__AVX2__)
-    caps.has_avx2 = true;
-    caps.backend = UL_CRYPTO_X86_AVX2;
     caps.speedup_factor = 4;
-#elif defined(__SSE2__) || defined(_M_X64)
-    caps.has_sse = true;
-    caps.backend = UL_CRYPTO_X86_SSE;
-    caps.speedup_factor = 2;
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    // x86/x64 - Runtime SIMD detection
+#if defined(_MSC_VER)
+    int cpuInfo[4];
+    __cpuid(cpuInfo, 1);
+    caps.has_sse = (cpuInfo[3] & (1 << 26)) != 0; // SSE2
+    __cpuidex(cpuInfo, 7, 0);
+    caps.has_avx2 = (cpuInfo[1] & (1 << 5)) != 0;
+#elif defined(__GNUC__) || defined(__clang__)
+    caps.has_avx2 = __builtin_cpu_supports("avx2");
+    caps.has_sse = __builtin_cpu_supports("sse2");
 #endif
 
-#if defined(__AES__) || defined(__AES_NI__)
-    caps.has_aesni = true;
-    // Note: ChaCha20 doesn't use AES, but helpful for future
-#endif
+    if (caps.has_avx2)
+    {
+        caps.backend = UL_CRYPTO_X86_AVX2;
+        caps.speedup_factor = 4;
+    }
+    else if (caps.has_sse)
+    {
+        caps.backend = UL_CRYPTO_X86_SSE;
+        caps.speedup_factor = 2;
+    }
 #endif
 
     return caps;
@@ -447,7 +474,7 @@ int ul_parse_char_fast(ul_parser_zerocopy_t *parser, uint8_t byte, ul_mempool_t 
     }
 
     // Parse byte using zero-copy parser
-    int result = ul_parse_char_zerocopy(parser, byte, parser->output_payload);
+    int result = ul_parse_char_zerocopy(parser, byte, parser->output_payload, UL_MEMPOOL_BUFFER_SIZE);
 
     if (result == 1)
     {
@@ -466,4 +493,45 @@ int ul_parse_char_fast(ul_parser_zerocopy_t *parser, uint8_t byte, ul_mempool_t 
     }
 
     return result;
+}
+
+int ul_check_replay_window(ul_parser_zerocopy_t *p, uint16_t seq)
+{
+    if (!p)
+        return UL_ERR_NULL_POINTER;
+
+    if (p->replay_init)
+    {
+        int16_t diff = (int16_t)(seq - p->last_seq);
+        // Handle 12-bit sequence wrap-around
+        if (diff > 2047)
+            diff -= 4096;
+        else if (diff < -2048)
+            diff += 4096;
+
+        if (diff <= 0)
+        {
+            uint8_t offset = (uint8_t)(-diff);
+            if (offset >= 32 || (p->replay_window & (1UL << offset)))
+            {
+                p->error_count++;
+                return UL_ERR_CRC; // Replay detected
+            }
+            p->replay_window |= (1UL << offset);
+        }
+        else
+        {
+            uint8_t shift = (uint8_t)diff;
+            p->replay_window = (shift >= 32) ? 0 : (p->replay_window << shift);
+            p->replay_window |= 1UL;
+            p->last_seq = seq;
+        }
+    }
+    else
+    {
+        p->replay_init = 1;
+        p->last_seq = seq;
+        p->replay_window = 1UL;
+    }
+    return 0; // Success
 }

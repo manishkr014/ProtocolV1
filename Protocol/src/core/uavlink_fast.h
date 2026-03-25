@@ -48,10 +48,19 @@ typedef struct
     uint8_t cipher_nonce[8]; // Nonce for decryption
     uint8_t cipher_tag[16];  // Authentication tag
     uint8_t *last_payload;   // Pointer to completed payload (valid after result==1)
-    
+
+    // CRC Context
+    uint16_t crc_in;        // Incoming CRC from packet
+    uint16_t crc_calc;      // Calculated CRC for validation
+
+    // Replay Protection
+    uint8_t replay_init;    // 1 if initialized
+    uint16_t last_seq;      // Highest accepted sequence number
+    uint32_t replay_window; // 32-bit sliding window bitmap
+
     // Statistics
-    uint32_t rx_count;       // Total valid packets parsed
-    uint32_t error_count;    // Total packets corrupted or dropped
+    uint32_t rx_count;    // Total valid packets parsed
+    uint32_t error_count; // Total packets corrupted or dropped
 } ul_parser_zerocopy_t;
 
 /**
@@ -59,6 +68,14 @@ typedef struct
  * @param parser Pointer to parser structure
  */
 void ul_parser_zerocopy_init(ul_parser_zerocopy_t *parser);
+
+/**
+ * Check sequence number against sliding replay window (Call AFTER MAC authentication!)
+ * @param parser Zero-copy parser
+ * @param seq    Sequence number of the authenticated packet
+ * @return 0 on success, negative if replay detected
+ */
+int ul_check_replay_window(ul_parser_zerocopy_t *parser, uint16_t seq);
 
 /**
  * Get the link quality (0-100) based on rx_count and error_count.
@@ -70,9 +87,10 @@ uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p);
  * @param parser Parser state
  * @param byte   Input byte
  * @param output_buf User-provided buffer for payload (min 256 bytes)
+ * @param output_buf_size Size of the output buffer
  * @return 1 on complete packet, 0 if incomplete, negative on error
  */
-int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf);
+int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf, size_t output_buf_size);
 
 /* --- Memory Pool Allocator --- */
 

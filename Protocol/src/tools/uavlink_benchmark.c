@@ -276,7 +276,7 @@ void benchmark_phase2(benchmark_result_t *result, int iterations)
         start = get_time_us();
         for (int j = 0; j < packet_len; j++)
         {
-            ul_parse_char_zerocopy(&parser, packet[j], parse_buf);
+            ul_parse_char_zerocopy(&parser, packet[j], parse_buf, sizeof(parse_buf));
         }
         end = get_time_us();
         result->parse_time_us += (end - start);

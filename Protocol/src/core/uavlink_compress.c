@@ -584,7 +584,7 @@ int ul_pack_phase3(const ul_header_t *header, const uint8_t *payload, size_t pay
     // Check compression
     if (ul_should_compress(payload, payload_len))
     {
-        uint8_t compressed[512];
+        uint8_t compressed[UL_MAX_PAYLOAD_SIZE + 16]; // Safe size for LZ4-style escape overhead
         int comp_len = ul_lz4_compress(payload, payload_len, compressed, sizeof(compressed));
         if (comp_len > 0 && (size_t)comp_len < payload_len * 0.9)
         {

@@ -47,24 +47,32 @@ static void secure_random(uint8_t *buf, size_t len)
 {
 #ifdef _WIN32
     // Dynamically load RtlGenRandom from advapi32.dll (works on all MinGW versions)
-    typedef BOOLEAN (WINAPI *RtlGenRandomFunc)(PVOID, ULONG);
+    typedef BOOLEAN(WINAPI * RtlGenRandomFunc)(PVOID, ULONG);
     static RtlGenRandomFunc pRtlGenRandom = NULL;
-    if (!pRtlGenRandom) {
+    if (!pRtlGenRandom)
+    {
         HMODULE hAdv = LoadLibraryA("advapi32.dll");
-        if (hAdv) pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
+        if (hAdv)
+            pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
     }
-    if (pRtlGenRandom) {
+    if (pRtlGenRandom)
+    {
         pRtlGenRandom(buf, (ULONG)len);
-    } else {
+    }
+    else
+    {
         fprintf(stderr, "FATAL: Cannot load RtlGenRandom\n");
         exit(1);
     }
 #else
     FILE *f = fopen("/dev/urandom", "rb");
-    if (f) {
+    if (f)
+    {
         fread(buf, 1, len, f);
         fclose(f);
-    } else {
+    }
+    else
+    {
         fprintf(stderr, "FATAL: Cannot open /dev/urandom\n");
         exit(1);
     }
@@ -498,7 +506,8 @@ int main(int argc, char *argv[])
         printf("ERROR: Could not load gcs_id_seed.bin (generate with keygen.py)\n");
         return 1;
     }
-    if (f_gcs_seed) fclose(f_gcs_seed);
+    if (f_gcs_seed)
+        fclose(f_gcs_seed);
 
     FILE *f_uav_pub = fopen("keys/uav_pub.bin", "rb");
     if (!f_uav_pub || fread(uav_id_public, 1, 32, f_uav_pub) != 32)
@@ -506,7 +515,8 @@ int main(int argc, char *argv[])
         printf("ERROR: Could not load uav_pub.bin (generate with id_gen.exe)\n");
         return 1;
     }
-    if (f_uav_pub) fclose(f_uav_pub);
+    if (f_uav_pub)
+        fclose(f_uav_pub);
 
     crypto_eddsa_key_pair(gcs_id_secret, gcs_id_public, gcs_id_seed);
     printf("Identity loaded: EdDSA Keys loaded successfully\n");
@@ -641,7 +651,7 @@ int main(int argc, char *argv[])
 
                 // Create signature over BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                 uint8_t sig_input[76];
-                memcpy(sig_input,      public_key, 32);
+                memcpy(sig_input, public_key, 32);
                 memcpy(sig_input + 32, gcs_id_public, 32);
                 memcpy(sig_input + 64, "UAVLink-v1.2", 12);
                 uint8_t sig_hash[64];
@@ -666,21 +676,26 @@ int main(int argc, char *argv[])
 
                 // If we already have session_key (from receiving UAV KEY_EXCHANGE), mark ESTABLISHED
                 bool has_key = false;
-                for (int i = 0; i < 32; i++) {
-                    if (session_key[i] != 0) {
+                for (int i = 0; i < 32; i++)
+                {
+                    if (session_key[i] != 0)
+                    {
                         has_key = true;
                         break;
                     }
                 }
 
-                if (has_key && ecdh_state == UL_ECDH_RECEIVED_KEY) {
+                if (has_key && ecdh_state == UL_ECDH_RECEIVED_KEY)
+                {
                     // We received their key earlier, now we sent ours - ESTABLISHED
                     ecdh_state = UL_ECDH_ESTABLISHED;
                     ecdh_retry_count = 0;
                     printf("\n  >>> ECDH: Session ESTABLISHED! (sent GCS key after receiving UAV key)\n>>> ");
                     printf("[UAVLink] Sic Parvis Magna.\n>>> ");
                     fflush(stdout);
-                } else {
+                }
+                else
+                {
                     ecdh_state = UL_ECDH_SENT_KEY;
                     ecdh_retry_count++;
                 }
@@ -829,7 +844,7 @@ int main(int argc, char *argv[])
             int result = 0;
             for (int i = 0; i < recv_len && result <= 0; i++)
             {
-                result = ul_parse_char_zerocopy(&parser, recv_buf[i], parse_output);
+                result = ul_parse_char_zerocopy(&parser, recv_buf[i], parse_output, sizeof(parse_output));
             }
 
             if (result == 1)
@@ -852,8 +867,6 @@ int main(int argc, char *argv[])
                     bool is_cmd = (stream_type == UL_STREAM_CMD || stream_type == UL_STREAM_CMD_ACK);
                     // AAD includes entire header from SOF byte
                     size_t header_len = 4 + (is_cmd ? 5 : 4) + (parser.header_buf[3] & UL_FLAG_ENCRYPTED ? 8 : 0);
-
-
 
                     int auth_result = crypto_aead_unlock(
                         parse_output, parser.cipher_tag, session_key, nonce24,
@@ -886,7 +899,7 @@ int main(int argc, char *argv[])
                     // Authenticate incoming Key Exchange Request
                     // Verify BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                     uint8_t verify_input[76];
-                    memcpy(verify_input,      rx_kx.public_key, 32);
+                    memcpy(verify_input, rx_kx.public_key, 32);
                     memcpy(verify_input + 32, uav_id_public, 32);
                     memcpy(verify_input + 64, "UAVLink-v1.2", 12);
                     uint8_t verify_hash[64];
@@ -922,7 +935,7 @@ int main(int argc, char *argv[])
 
                     // Sign BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                     uint8_t reply_sig_input[76];
-                    memcpy(reply_sig_input,      public_key, 32);
+                    memcpy(reply_sig_input, public_key, 32);
                     memcpy(reply_sig_input + 32, gcs_id_public, 32);
                     memcpy(reply_sig_input + 64, "UAVLink-v1.2", 12);
                     uint8_t reply_sig_hash[64];
@@ -945,7 +958,7 @@ int main(int argc, char *argv[])
 
                     uint8_t *kx_buf = NULL;
                     int kx_pkt_len = ul_pack_fast(&pool, &kx_hdr, kx_payload, session_key,
-                                                   &nonce_state, &crypto_ctx, &kx_buf);
+                                                  &nonce_state, &crypto_ctx, &kx_buf);
                     if (kx_pkt_len > 0 && kx_buf)
                     {
                         sendto(cmd_sock, (char *)kx_buf, kx_pkt_len, 0,
@@ -1008,21 +1021,26 @@ int main(int argc, char *argv[])
                     {
                         // Check if session_key is valid (not all zeros)
                         bool has_key = false;
-                        for (int i = 0; i < 32; i++) {
-                            if (session_key[i] != 0) {
+                        for (int i = 0; i < 32; i++)
+                        {
+                            if (session_key[i] != 0)
+                            {
                                 has_key = true;
                                 break;
                             }
                         }
 
-                        if (has_key) {
+                        if (has_key)
+                        {
                             // We have session_key, mark ESTABLISHED
                             ecdh_state = UL_ECDH_ESTABLISHED;
                             ecdh_retry_count = 0;
                             printf("\n  >>> ECDH: Received ACK for seq=%u, session ESTABLISHED!\n>>> ", ecdh_seq_num);
                             printf("[UAVLink] Sic Parvis Magna.\n>>> ");
                             fflush(stdout);
-                        } else {
+                        }
+                        else
+                        {
                             printf("\n  >>> ECDH: Received ACK for seq=%u (waiting for UAV KEY_EXCHANGE)\n>>> ", ecdh_seq_num);
                             fflush(stdout);
                         }

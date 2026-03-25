@@ -331,10 +331,10 @@ To add UAVLink to your flight controller or ground station:
 ### Packet Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ [Base Header] [Extended Header] [Payload] [MAC Tag*] [CRC-16]   │
-│    4 bytes      4-13 bytes      0-4095 B   16 bytes*  2 bytes   │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────┐─────────────────┐──────────┐──────────┐────────┐
+│[Base Header]│[Extended Header]│ [Payload]│[MAC Tag*]│[CRC-16]│
+│   4 bytes   │  4-13 bytes     │ 0-4095 B │16 bytes* │ 2 bytes│
+└─────────────┘─────────────────┘──────────┘──────────┘────────┘
 * 16-byte Poly1305 MAC tag only present when encrypted flag is set
 ```
 

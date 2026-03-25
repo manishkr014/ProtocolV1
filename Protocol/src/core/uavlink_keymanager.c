@@ -7,10 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <wincrypt.h>
 #include <aclapi.h>
 #else
 #include <sys/stat.h>
@@ -41,9 +41,48 @@ bool ul_check_file_permissions(const char *filename)
         return false;
     }
 
-    // For now, just check file exists
-    // Full ACL checking would require more complex code
-    return true;
+    // Basic ACL checking - Ensure "Everyone" doesn't have read access
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    PACL pDacl = NULL;
+    bool secure = false;
+
+    if (GetNamedSecurityInfoA(filename, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pDacl, NULL, &pSD) == ERROR_SUCCESS)
+    {
+        // Try to find if "Everyone" (World) has any access
+        ACL_SIZE_INFORMATION aclSize;
+        if (GetAclInformation(pDacl, &aclSize, sizeof(aclSize), AclSizeInformation))
+        {
+            secure = true; // Assume secure unless we find a wide-open ACE
+            PSID everyoneSid = NULL;
+            SID_IDENTIFIER_AUTHORITY worldAuth = SECURITY_WORLD_SID_AUTHORITY;
+            if (AllocateAndInitializeSid(&worldAuth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyoneSid))
+            {
+                for (DWORD i = 0; i < aclSize.AceCount; i++)
+                {
+                    PVOID pAce = NULL;
+                    if (GetAce(pDacl, i, &pAce))
+                    {
+                        PACE_HEADER pHeader = (PACE_HEADER)pAce;
+                        if (pHeader->AceType == ACCESS_ALLOWED_ACE_TYPE)
+                        {
+                            ACCESS_ALLOWED_ACE *pAllowed = (ACCESS_ALLOWED_ACE *)pAce;
+                            if (EqualSid(everyoneSid, (PSID)&pAllowed->SidStart))
+                            {
+                                // Everyone has some access - this is insecure for a key file
+                                secure = false;
+                                fprintf(stderr, "⚠️  Warning: Key file %s is accessible by 'Everyone'\n", filename);
+                                break;
+                            }
+                        }
+                    }
+                }
+                FreeSid(everyoneSid);
+            }
+        }
+        LocalFree(pSD);
+    }
+
+    return secure;
 #else
     // Unix/Linux: Check that only owner has read/write
     struct stat st;
@@ -212,24 +251,46 @@ int ul_load_key_from_env(const char *var_name, uint8_t key_out[32], int format)
     return UL_KEY_ERR_FORMAT;
 }
 
-// Generate random key (development only)
+// Generate random key (using Cryptographically Secure PRNG)
 void ul_generate_random_key(uint8_t key_out[32])
 {
     if (key_out == NULL)
         return;
 
-    // Seed random with time
-    srand((unsigned int)time(NULL));
-
-    // Generate random bytes
-    for (int i = 0; i < 32; i++)
+#ifdef _WIN32
+    HCRYPTPROV hProvider;
+    if (CryptAcquireContext(&hProvider, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
     {
-        key_out[i] = rand() & 0xFF;
+        if (!CryptGenRandom(hProvider, 32, key_out))
+        {
+            fprintf(stderr, "ERROR: CryptGenRandom failed!\n");
+            ul_secure_zero(key_out, 32);
+        }
+        CryptReleaseContext(hProvider, 0);
     }
-
-    fprintf(stderr, "⚠️  WARNING: Using weak random key generation!\n");
-    fprintf(stderr, "    This is NOT suitable for production use.\n");
-    fprintf(stderr, "    Use keygen.py to generate cryptographically secure keys.\n");
+    else
+    {
+        fprintf(stderr, "ERROR: Failed to acquire Windows Crypto Context!\n");
+        ul_secure_zero(key_out, 32);
+    }
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f != NULL)
+    {
+        size_t bytes = fread(key_out, 1, 32, f);
+        fclose(f);
+        if (bytes != 32)
+        {
+            fprintf(stderr, "ERROR: Failed to read sufficient entropy from /dev/urandom\n");
+            ul_secure_zero(key_out, 32);
+        }
+    }
+    else
+    {
+        fprintf(stderr, "ERROR: Cannot open /dev/urandom\n");
+        ul_secure_zero(key_out, 32);
+    }
+#endif
 }
 
 // Get error description

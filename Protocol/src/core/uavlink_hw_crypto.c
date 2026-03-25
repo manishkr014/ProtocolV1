@@ -14,6 +14,13 @@
 #include <sys/time.h>
 #endif
 
+// Alignment macro
+#if defined(_MSC_VER)
+#define UL_ALIGN(n) __declspec(align(n))
+#else
+#define UL_ALIGN(n) __attribute__((aligned(n)))
+#endif
+
 /* Global flag for hardware crypto enable/disable */
 static bool g_hw_crypto_enabled = false;
 
@@ -27,8 +34,8 @@ void ul_chacha20_neon(const uint8_t key[32], const uint8_t nonce[8],
                       const uint8_t *input, uint8_t *output, size_t len,
                       uint32_t initial_counter)
 {
-    // ChaCha20 state initialization
-    uint32_t state[16];
+    // ChaCha20 state initialization - ensure 16-byte alignment for NEON
+    UL_ALIGN(16) uint32_t state[16];
 
     // Constants "expand 32-byte k"
     state[0] = 0x61707865;
@@ -41,10 +48,10 @@ void ul_chacha20_neon(const uint8_t key[32], const uint8_t nonce[8],
 
     // Counter starts at initial_counter (0 for Poly1305 key gen, 1 for encryption)
     state[12] = initial_counter;
+    state[13] = 0; // High 32-bits of counter
 
-    // Nonce (2 words = 8 bytes)
-    memcpy(&state[13], nonce, 8);
-    state[15] = 0; // High 32 bits of nonce
+    // Nonce (2 words = 8 bytes) matching DJB ChaCha20
+    memcpy(&state[14], nonce, 8);
 
     // Process blocks using NEON
     size_t blocks = len / 64;
@@ -155,7 +162,7 @@ void ul_chacha20_poly1305_encrypt_neon(const uint8_t key[32], const uint8_t nonc
     // Generate Poly1305 key: ChaCha20 block counter=0 with message nonce.
     // Only the first 32 bytes of the 64-byte block are used as the key.
     uint8_t poly_key[32] = {0};
-    ul_chacha20_neon(key, nonce, poly_key, poly_key, 32);
+    ul_chacha20_neon(key, nonce, poly_key, poly_key, 32, 0); // Explicit counter=0
 
     // Compute MAC using monocypher's Poly1305
     crypto_poly1305_ctx ctx;
@@ -203,12 +210,100 @@ int ul_chacha20_poly1305_decrypt_neon(const uint8_t key[32], const uint8_t nonce
 
 #if UL_HW_SSE2_AVAILABLE
 
-void ul_chacha20_sse2(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len)
+static inline void chacha20_qr_sse2(__m128i *a, __m128i *b, __m128i *c, __m128i *d)
 {
-    // SSE2 implementation would go here
-    // For now, fall back to monocypher
-    crypto_chacha20_djb(output, input, len, key, nonce, 0);
+    *a = _mm_add_epi32(*a, *b); *d = _mm_xor_si128(*d, *a); *d = _mm_xor_si128(_mm_slli_epi32(*d, 16), _mm_srli_epi32(*d, 16));
+    *c = _mm_add_epi32(*c, *d); *b = _mm_xor_si128(*b, *c); *b = _mm_xor_si128(_mm_slli_epi32(*b, 12), _mm_srli_epi32(*b, 20));
+    *a = _mm_add_epi32(*a, *b); *d = _mm_xor_si128(*d, *a); *d = _mm_xor_si128(_mm_slli_epi32(*d, 8), _mm_srli_epi32(*d, 24));
+    *c = _mm_add_epi32(*c, *d); *b = _mm_xor_si128(*b, *c); *b = _mm_xor_si128(_mm_slli_epi32(*b, 7), _mm_srli_epi32(*b, 25));
+}
+
+void ul_chacha20_sse2(const uint8_t key[32], const uint8_t nonce[8],
+                       const uint8_t *input, uint8_t *output, size_t len,
+                       uint32_t initial_counter)
+{
+    UL_ALIGN(16) uint32_t state[16];
+    state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x6b206574;
+    memcpy(&state[4], key, 32);
+    state[12] = initial_counter; state[13] = 0;
+    memcpy(&state[14], nonce, 8);
+
+    size_t blocks = len / 64;
+    size_t remaining = len % 64;
+
+    for (size_t i = 0; i < blocks; i++)
+    {
+        __m128i v0 = _mm_loadu_si128((__m128i*)&state[0]);
+        __m128i v1 = _mm_loadu_si128((__m128i*)&state[4]);
+        __m128i v2 = _mm_loadu_si128((__m128i*)&state[8]);
+        __m128i v3 = _mm_loadu_si128((__m128i*)&state[12]);
+
+        __m128i s0 = v0, s1 = v1, s2 = v2, s3 = v3;
+
+        for (int round = 0; round < 10; round++)
+        {
+            chacha20_qr_sse2(&v0, &v1, &v2, &v3);
+            v1 = _mm_shuffle_epi32(v1, _MM_SHUFFLE(0, 3, 2, 1));
+            v2 = _mm_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm_shuffle_epi32(v3, _MM_SHUFFLE(2, 1, 0, 3));
+            chacha20_qr_sse2(&v0, &v1, &v2, &v3);
+            v1 = _mm_shuffle_epi32(v1, _MM_SHUFFLE(2, 1, 0, 3));
+            v2 = _mm_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm_shuffle_epi32(v3, _MM_SHUFFLE(0, 3, 2, 1));
+        }
+
+        v0 = _mm_add_epi32(v0, s0);
+        v1 = _mm_add_epi32(v1, s1);
+        v2 = _mm_add_epi32(v2, s2);
+        v3 = _mm_add_epi32(v3, s3);
+
+        uint32_t keystream[16];
+        _mm_storeu_si128((__m128i*)&keystream[0], v0);
+        _mm_storeu_si128((__m128i*)&keystream[4], v1);
+        _mm_storeu_si128((__m128i*)&keystream[8], v2);
+        _mm_storeu_si128((__m128i*)&keystream[12], v3);
+
+        for (int j = 0; j < 64; j++)
+            output[i * 64 + j] = input[i * 64 + j] ^ ((uint8_t *)keystream)[j];
+
+        state[12]++;
+    }
+
+    if (remaining > 0)
+    {
+        __m128i v0 = _mm_loadu_si128((__m128i*)&state[0]);
+        __m128i v1 = _mm_loadu_si128((__m128i*)&state[4]);
+        __m128i v2 = _mm_loadu_si128((__m128i*)&state[8]);
+        __m128i v3 = _mm_loadu_si128((__m128i*)&state[12]);
+
+        __m128i s0 = v0, s1 = v1, s2 = v2, s3 = v3;
+
+        for (int round = 0; round < 10; round++)
+        {
+            chacha20_qr_sse2(&v0, &v1, &v2, &v3);
+            v1 = _mm_shuffle_epi32(v1, _MM_SHUFFLE(0, 3, 2, 1));
+            v2 = _mm_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm_shuffle_epi32(v3, _MM_SHUFFLE(2, 1, 0, 3));
+            chacha20_qr_sse2(&v0, &v1, &v2, &v3);
+            v1 = _mm_shuffle_epi32(v1, _MM_SHUFFLE(2, 1, 0, 3));
+            v2 = _mm_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm_shuffle_epi32(v3, _MM_SHUFFLE(0, 3, 2, 1));
+        }
+
+        v0 = _mm_add_epi32(v0, s0);
+        v1 = _mm_add_epi32(v1, s1);
+        v2 = _mm_add_epi32(v2, s2);
+        v3 = _mm_add_epi32(v3, s3);
+
+        uint32_t keystream[16];
+        _mm_storeu_si128((__m128i*)&keystream[0], v0);
+        _mm_storeu_si128((__m128i*)&keystream[4], v1);
+        _mm_storeu_si128((__m128i*)&keystream[8], v2);
+        _mm_storeu_si128((__m128i*)&keystream[12], v3);
+
+        for (size_t j = 0; j < remaining; j++)
+            output[blocks * 64 + j] = input[blocks * 64 + j] ^ ((uint8_t *)keystream)[j];
+    }
 }
 
 #endif
@@ -219,12 +314,116 @@ void ul_chacha20_sse2(const uint8_t key[32], const uint8_t nonce[8],
 
 #if UL_HW_AVX2_AVAILABLE
 
-void ul_chacha20_avx2(const uint8_t key[32], const uint8_t nonce[8],
-                      const uint8_t *input, uint8_t *output, size_t len)
+static inline void chacha20_qr_avx2(__m256i *a, __m256i *b, __m256i *c, __m256i *d)
 {
-    // AVX2 implementation would go here (can process 8 blocks in parallel)
-    // For now, fall back to monocypher
-    crypto_chacha20_djb(output, input, len, key, nonce, 0);
+    *a = _mm256_add_epi32(*a, *b); *d = _mm256_xor_si256(*d, *a); *d = _mm256_xor_si256(_mm256_slli_epi32(*d, 16), _mm256_srli_epi32(*d, 16));
+    *c = _mm256_add_epi32(*c, *d); *b = _mm256_xor_si256(*b, *c); *b = _mm256_xor_si256(_mm256_slli_epi32(*b, 12), _mm256_srli_epi32(*b, 20));
+    *a = _mm256_add_epi32(*a, *b); *d = _mm256_xor_si256(*d, *a); *d = _mm256_xor_si256(_mm256_slli_epi32(*d, 8), _mm256_srli_epi32(*d, 24));
+    *c = _mm256_add_epi32(*c, *d); *b = _mm256_xor_si256(*b, *c); *b = _mm256_xor_si256(_mm256_slli_epi32(*b, 7), _mm256_srli_epi32(*b, 25));
+}
+
+void ul_chacha20_avx2(const uint8_t key[32], const uint8_t nonce[8],
+                       const uint8_t *input, uint8_t *output, size_t len,
+                       uint32_t initial_counter)
+{
+    UL_ALIGN(32) uint32_t state[16]; // AVX2 ideally needs 32-byte alignment
+    state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x6b206574;
+    memcpy(&state[4], key, 32);
+    state[12] = initial_counter; state[13] = 0;
+    memcpy(&state[14], nonce, 8);
+
+    size_t blocks = len / 128; // 2 blocks per iteration
+    size_t remaining = len % 128;
+
+    __m256i add_counter = _mm256_set_epi32(0, 0, 0, 1, 0, 0, 0, 0);
+
+    for (size_t i = 0; i < blocks; i++)
+    {
+        __m256i v0 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[0]));
+        __m256i v1 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[4]));
+        __m256i v2 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[8]));
+        __m256i v3 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[12]));
+
+        v3 = _mm256_add_epi32(v3, add_counter);
+
+        __m256i s0 = v0, s1 = v1, s2 = v2, s3 = v3;
+
+        for (int round = 0; round < 10; round++)
+        {
+            chacha20_qr_avx2(&v0, &v1, &v2, &v3);
+            v1 = _mm256_shuffle_epi32(v1, _MM_SHUFFLE(0, 3, 2, 1));
+            v2 = _mm256_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm256_shuffle_epi32(v3, _MM_SHUFFLE(2, 1, 0, 3));
+            chacha20_qr_avx2(&v0, &v1, &v2, &v3);
+            v1 = _mm256_shuffle_epi32(v1, _MM_SHUFFLE(2, 1, 0, 3));
+            v2 = _mm256_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm256_shuffle_epi32(v3, _MM_SHUFFLE(0, 3, 2, 1));
+        }
+
+        v0 = _mm256_add_epi32(v0, s0);
+        v1 = _mm256_add_epi32(v1, s1);
+        v2 = _mm256_add_epi32(v2, s2);
+        v3 = _mm256_add_epi32(v3, s3);
+
+        uint32_t keystream[32];
+        _mm_storeu_si128((__m128i*)&keystream[0], _mm256_extracti128_si256(v0, 0));
+        _mm_storeu_si128((__m128i*)&keystream[4], _mm256_extracti128_si256(v1, 0));
+        _mm_storeu_si128((__m128i*)&keystream[8], _mm256_extracti128_si256(v2, 0));
+        _mm_storeu_si128((__m128i*)&keystream[12], _mm256_extracti128_si256(v3, 0));
+
+        _mm_storeu_si128((__m128i*)&keystream[16], _mm256_extracti128_si256(v0, 1));
+        _mm_storeu_si128((__m128i*)&keystream[20], _mm256_extracti128_si256(v1, 1));
+        _mm_storeu_si128((__m128i*)&keystream[24], _mm256_extracti128_si256(v2, 1));
+        _mm_storeu_si128((__m128i*)&keystream[28], _mm256_extracti128_si256(v3, 1));
+
+        for (int j = 0; j < 128; j++)
+            output[i * 128 + j] = input[i * 128 + j] ^ ((uint8_t *)keystream)[j];
+
+        state[12] += 2;
+    }
+
+    if (remaining > 0)
+    {
+        __m256i v0 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[0]));
+        __m256i v1 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[4]));
+        __m256i v2 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[8]));
+        __m256i v3 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i*)&state[12]));
+
+        v3 = _mm256_add_epi32(v3, add_counter);
+
+        __m256i s0 = v0, s1 = v1, s2 = v2, s3 = v3;
+
+        for (int round = 0; round < 10; round++)
+        {
+            chacha20_qr_avx2(&v0, &v1, &v2, &v3);
+            v1 = _mm256_shuffle_epi32(v1, _MM_SHUFFLE(0, 3, 2, 1));
+            v2 = _mm256_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm256_shuffle_epi32(v3, _MM_SHUFFLE(2, 1, 0, 3));
+            chacha20_qr_avx2(&v0, &v1, &v2, &v3);
+            v1 = _mm256_shuffle_epi32(v1, _MM_SHUFFLE(2, 1, 0, 3));
+            v2 = _mm256_shuffle_epi32(v2, _MM_SHUFFLE(1, 0, 3, 2));
+            v3 = _mm256_shuffle_epi32(v3, _MM_SHUFFLE(0, 3, 2, 1));
+        }
+
+        v0 = _mm256_add_epi32(v0, s0);
+        v1 = _mm256_add_epi32(v1, s1);
+        v2 = _mm256_add_epi32(v2, s2);
+        v3 = _mm256_add_epi32(v3, s3);
+
+        uint32_t keystream[32];
+        _mm_storeu_si128((__m128i*)&keystream[0], _mm256_extracti128_si256(v0, 0));
+        _mm_storeu_si128((__m128i*)&keystream[4], _mm256_extracti128_si256(v1, 0));
+        _mm_storeu_si128((__m128i*)&keystream[8], _mm256_extracti128_si256(v2, 0));
+        _mm_storeu_si128((__m128i*)&keystream[12], _mm256_extracti128_si256(v3, 0));
+
+        _mm_storeu_si128((__m128i*)&keystream[16], _mm256_extracti128_si256(v0, 1));
+        _mm_storeu_si128((__m128i*)&keystream[20], _mm256_extracti128_si256(v1, 1));
+        _mm_storeu_si128((__m128i*)&keystream[24], _mm256_extracti128_si256(v2, 1));
+        _mm_storeu_si128((__m128i*)&keystream[28], _mm256_extracti128_si256(v3, 1));
+
+        for (size_t j = 0; j < remaining; j++)
+            output[blocks * 128 + j] = input[blocks * 128 + j] ^ ((uint8_t *)keystream)[j];
+    }
 }
 
 #endif
@@ -244,11 +443,11 @@ void ul_chacha20_auto(const uint8_t key[32], const uint8_t nonce[8],
     }
 
 #if UL_HW_AVX2_AVAILABLE
-    ul_chacha20_avx2(key, nonce, input, output, len);
+    ul_chacha20_avx2(key, nonce, input, output, len, 1);
 #elif UL_HW_NEON_AVAILABLE
-    ul_chacha20_neon(key, nonce, input, output, len);
+    ul_chacha20_neon(key, nonce, input, output, len, 1);
 #elif UL_HW_SSE2_AVAILABLE
-    ul_chacha20_sse2(key, nonce, input, output, len);
+    ul_chacha20_sse2(key, nonce, input, output, len, 1);
 #else
     // No hardware acceleration available
     crypto_chacha20_djb(output, input, len, key, nonce, 0);

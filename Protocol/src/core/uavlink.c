@@ -1,6 +1,7 @@
 #include "uavlink.h"
 #include <string.h>
-#include <stdio.h> /* For debug printf */
+#include <stdio.h>  /* For debug printf */
+#include <stdlib.h> /* For abort() */
 #include "monocypher.h"
 
 /**
@@ -70,7 +71,8 @@ uint8_t ul_get_crc_seed(uint16_t msg_id)
 {
     if (msg_id < UL_CRC_SEED_TABLE_SIZE)
         return ul_crc_seed_table[msg_id];
-    return 0; // Unknown message
+    // Hash-based seed for unknown/custom messages instead of 0
+    return (uint8_t)((msg_id * 31 + 7) & 0xFF);
 }
 
 /* --- Base Header --- */
@@ -785,14 +787,11 @@ static uint32_t ul_get_random_u32(void)
 
     if (!CryptAcquireContext(&hProvider, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
     {
-        /* Fallback: use XOR of compile-time and runtime values — not cryptographic,
-           but avoids silently returning 0 which would be a predictable nonce. */
-        random_value = (uint32_t)(uintptr_t)&random_value ^ 0xDEADBEEFu;
-        return random_value;
+        abort(); // Fail instead of fallback
     }
     if (!CryptGenRandom(hProvider, sizeof(random_value), (BYTE *)&random_value))
     {
-        random_value = (uint32_t)(uintptr_t)&random_value ^ 0xCAFEBABEu;
+        abort(); // Fail instead of fallback
     }
     CryptReleaseContext(hProvider, 0);
     return random_value;
@@ -802,15 +801,13 @@ static uint32_t ul_get_random_u32(void)
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0)
     {
-        /* Fallback: use address-space entropy — not cryptographic, but not zero */
-        return (uint32_t)(uintptr_t)&random_value ^ 0xDEADBEEFu;
+        abort(); // Fail instead of fallback
     }
     ssize_t n = read(fd, &random_value, sizeof(random_value));
     close(fd);
     if (n != (ssize_t)sizeof(random_value))
     {
-        /* Partial read fallback */
-        random_value ^= (uint32_t)(uintptr_t)&random_value ^ 0xCAFEBABEu;
+        abort(); // Fail instead of fallback
     }
     return random_value;
 #endif
@@ -859,7 +856,10 @@ void ul_nonce_generate(ul_nonce_state_t *state, uint8_t nonce[8])
     // Detect counter overflow: if counter is about to wrap, reinitialize with fresh random seed
     if (state->counter == 0xFFFFFFFF)
     {
-        state->counter = ul_get_random_u32(); // Re-seed instead of silent wrap to 0
+        // If the 32-bit counter wraps, we must re-seed to avoid immediate reuse.
+        // In a production system, this should ideally trigger a re-keying.
+        state->counter = ul_get_random_u32();
+        if (state->counter == 0xFFFFFFFF) state->counter = 0; // Avoid immediate re-wrap
     }
     uint32_t counter = state->counter++;
     uint32_t random = ul_get_random_u32();
@@ -900,14 +900,7 @@ int uavlink_pack(uint8_t *buf, const ul_header_t *h, const uint8_t *payload, con
             hout.nonce[3] == 0 && hout.nonce[4] == 0 && hout.nonce[5] == 0 &&
             hout.nonce[6] == 0 && hout.nonce[7] == 0)
         {
-            /* All zeros - generate a simple timestamp-based nonce as fallback */
-            static uint32_t fallback_counter = 0;
-            uint32_t counter = fallback_counter++;
-            hout.nonce[0] = counter & 0xFF;
-            hout.nonce[1] = (counter >> 8) & 0xFF;
-            hout.nonce[2] = (counter >> 16) & 0xFF;
-            hout.nonce[3] = (counter >> 24) & 0xFF;
-            /* Leave upper 4 bytes as zero */
+            return UL_ERR_INVALID_HEADER; // Nonce cannot be all zeros
         }
     }
     else
@@ -937,8 +930,6 @@ int uavlink_pack(uint8_t *buf, const ul_header_t *h, const uint8_t *payload, con
         /* crypto_aead_lock(mac, ciphertext, key, nonce, ad, ad_size, plaintext, text_size)
            - Encrypts payload and generates MAC over both header (AAD) and ciphertext
            - MAC protects against both ciphertext and header manipulation */
-
-
 
         crypto_aead_lock(buf + header_len,  /* Output: ciphertext */
                          mac,               /* Output: MAC tag */
@@ -1153,10 +1144,16 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
 
             // Replay protection: 32-packet sliding window
             {
-                uint8_t seq = (uint8_t)p->header.sequence;
+                uint16_t seq = p->header.sequence;
                 if (p->replay_init)
                 {
-                    int8_t diff = (int8_t)(seq - p->last_seq);
+                    int16_t diff = (int16_t)(seq - p->last_seq);
+                    // Handle 12-bit sequence wrap-around
+                    if (diff > 2047)
+                        diff -= 4096;
+                    else if (diff < -2048)
+                        diff += 4096;
+
                     if (diff <= 0)
                     {
                         /* Packet is older than or equal to the highest seen */
@@ -1423,7 +1420,18 @@ int uavlink_pack_batch(uint8_t *buf, const ul_batch_t *batch,
     header.target_sys_id = 0; /* Broadcast */
 
     /* Pack the batched message using selective encryption */
-    return uavlink_pack_selective(buf, &header, payload, key_32b, nonce_state);
+    int ret = uavlink_pack_selective(buf, &header, payload, key_32b, nonce_state);
+
+    /* Securely clear the stack payload buffer to prevent leaking sensitive batch data */
+    {
+        volatile uint8_t *p = (volatile uint8_t *)payload;
+        for (size_t idx = 0; idx < sizeof(payload); idx++)
+        {
+            p[idx] = 0;
+        }
+    }
+
+    return ret;
 }
 
 int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
@@ -1443,7 +1451,7 @@ int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
     for (uint8_t i = 0; i < num_messages; i++)
     {
         /* Need 3 bytes: msg_id (2) + length (1) */
-        if (pos + 3 > payload_len)
+        if (3 > payload_len - pos)
             return UL_ERR_BUFFER_OVERFLOW;
 
         uint16_t msg_id = (uint16_t)payload[pos] | ((uint16_t)payload[pos + 1] << 8);
@@ -1453,7 +1461,7 @@ int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
         /* Validate length fits within data[] and remaining payload */
         if (length > sizeof(batch_out->messages[i].data))
             return UL_ERR_BUFFER_OVERFLOW;
-        if (pos + length > payload_len)
+        if (length > payload_len - pos)
             return UL_ERR_BUFFER_OVERFLOW;
 
         batch_out->messages[i].msg_id = msg_id;

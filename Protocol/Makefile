@@ -13,7 +13,7 @@ CORE_SRC = $(SRC_CORE)/uavlink.c $(SRC_CORE)/uavlink_fast.c $(SRC_CORE)/uavlink_
 
 # Platform-specific flags
 ifeq ($(OS),Windows_NT)
-    LDFLAGS = -lws2_32 -lm
+    LDFLAGS = -lws2_32 -ladvapi32 -lm
     EXT = .exe
 else
     LDFLAGS = -lm

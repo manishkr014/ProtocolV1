@@ -50,24 +50,32 @@ static void secure_random(uint8_t *buf, size_t len)
 {
 #ifdef _WIN32
     // Dynamically load RtlGenRandom from advapi32.dll (works on all MinGW versions)
-    typedef BOOLEAN (WINAPI *RtlGenRandomFunc)(PVOID, ULONG);
+    typedef BOOLEAN(WINAPI * RtlGenRandomFunc)(PVOID, ULONG);
     static RtlGenRandomFunc pRtlGenRandom = NULL;
-    if (!pRtlGenRandom) {
+    if (!pRtlGenRandom)
+    {
         HMODULE hAdv = LoadLibraryA("advapi32.dll");
-        if (hAdv) pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
+        if (hAdv)
+            pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
     }
-    if (pRtlGenRandom) {
+    if (pRtlGenRandom)
+    {
         pRtlGenRandom(buf, (ULONG)len);
-    } else {
+    }
+    else
+    {
         fprintf(stderr, "FATAL: Cannot load RtlGenRandom\n");
         exit(1);
     }
 #else
     FILE *f = fopen("/dev/urandom", "rb");
-    if (f) {
+    if (f)
+    {
         fread(buf, 1, len, f);
         fclose(f);
-    } else {
+    }
+    else
+    {
         fprintf(stderr, "FATAL: Cannot open /dev/urandom\n");
         exit(1);
     }
@@ -474,7 +482,7 @@ int main(int argc, char *argv[])
                 int result = 0;
                 for (int i = 0; i < recv_len && result <= 0; i++)
                 {
-                    result = ul_parse_char_zerocopy(&cmd_parser, cmd_recv_buf[i], parse_buf);
+                    result = ul_parse_char_zerocopy(&cmd_parser, cmd_recv_buf[i], parse_buf, 256);
                 }
 
                 if (result == 1)
@@ -536,6 +544,15 @@ int main(int argc, char *argv[])
                         }
                     }
 
+                    // Enforce sliding replay window strictly AFTER MAC validation
+                    uint8_t received_seq = cmd_parser.header_buf[1];
+                    if (ul_check_replay_window(&cmd_parser, received_seq) != 0)
+                    {
+                        printf("[SECURITY] Replay attack detected (seq=%u). Dropping.\n", received_seq);
+                        ul_mempool_free(&pool, parse_buf);
+                        goto next_iter;
+                    }
+
                     printf("[CMD #%u] ", commands_received);
 
                     switch (hdr.msg_id)
@@ -555,7 +572,7 @@ int main(int argc, char *argv[])
                         // Authenticate incoming Key Exchange Request
                         // Verify BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                         uint8_t verify_input[76];
-                        memcpy(verify_input,      rx_kx.public_key, 32);
+                        memcpy(verify_input, rx_kx.public_key, 32);
                         memcpy(verify_input + 32, gcs_id_public, 32);
                         memcpy(verify_input + 64, "UAVLink-v1.2", 12);
                         uint8_t verify_hash[64];
@@ -588,7 +605,7 @@ int main(int argc, char *argv[])
 
                         // Sign BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                         uint8_t reply_sig_input[76];
-                        memcpy(reply_sig_input,      public_key, 32);
+                        memcpy(reply_sig_input, public_key, 32);
                         memcpy(reply_sig_input + 32, uav_id_public, 32);
                         memcpy(reply_sig_input + 64, "UAVLink-v1.2", 12);
                         uint8_t reply_sig_hash[64];
@@ -891,7 +908,7 @@ int main(int argc, char *argv[])
 
                 // Create signature over BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
                 uint8_t sig_input[76];
-                memcpy(sig_input,      public_key, 32);
+                memcpy(sig_input, public_key, 32);
                 memcpy(sig_input + 32, uav_id_public, 32);
                 memcpy(sig_input + 64, "UAVLink-v1.2", 12);
                 uint8_t sig_hash[64];
@@ -1053,7 +1070,7 @@ int main(int argc, char *argv[])
         }
 
         // --- PyQt5 Telemetry Output ---
-        printf("[TM] ALT:%d BAT:%d MODE:%d ARMED:%d ROLL:%.2f PITCH:%.2f YAW:%.2f\n", 
+        printf("[TM] ALT:%d BAT:%d MODE:%d ARMED:%d ROLL:%.2f PITCH:%.2f YAW:%.2f\n",
                state.alt, state.voltage, state.flight_mode, state.armed, state.roll, state.pitch, state.yaw);
         fflush(stdout);
 

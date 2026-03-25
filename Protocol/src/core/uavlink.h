@@ -153,7 +153,7 @@ typedef struct
 
     /* Replay protection: 32-packet sliding window keyed on sequence number */
     uint8_t replay_init;    /* 1 once first valid packet received */
-    uint8_t last_seq;       /* Highest accepted sequence number    */
+    uint16_t last_seq;      /* Highest accepted sequence number    */
     uint32_t replay_window; /* Bitmap: bit i set => (last_seq - i) seen */
 
     /* Statistics / Link Quality */
