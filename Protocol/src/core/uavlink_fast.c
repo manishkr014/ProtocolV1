@@ -33,16 +33,15 @@ uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p)
     if (!p)
         return 0;
 
-    // Avoid divide-by-zero
-    if (p->rx_count + p->error_count == 0)
-        return 0;
-
+    /* Bug-8 FIX (a): The second `total == 0` check was dead code — total was just
+       computed from the same values and could not have changed. Removed.
+       Bug-8 FIX (b): p->rx_count * 100 silently overflows uint32_t at ~42.9 million
+       packets, producing a wildly wrong quality reading. Cast to uint64_t first. */
     uint32_t total = p->rx_count + p->error_count;
     if (total == 0)
         return 0;
 
-    // Use integer math to avoid float overhead
-    return (uint8_t)((p->rx_count * 100) / total);
+    return (uint8_t)(((uint64_t)p->rx_count * 100U) / total);
 }
 
 int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *output_buf, size_t output_buf_size)
@@ -52,10 +51,24 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
         return -1; // Error
     }
 
-    // Zero-copy: only set output buffer if not already set (prevents redundant writes)
-    if (!parser->output_payload)
+    /* Bug-5 FIX: The original guard set output_payload once on the very first call and
+       then silently ignored any different buffer supplied on later calls — even for a
+       brand-new packet. In streaming scenarios where the caller provides a fresh buffer
+       per packet, all writes went into the first buffer ever supplied.
+
+       Fix: update output_payload whenever the parser is in IDLE state (state==0),
+       i.e. at the start of a new packet. Mid-packet the pointer must stay stable;
+       switching buffers mid-flight is a caller error and we reset with an error. */
+    if (parser->state == 0)
     {
         parser->output_payload = output_buf;
+    }
+    else if (parser->output_payload != output_buf && parser->output_payload != NULL)
+    {
+        /* Mid-packet buffer pointer switch — treat as caller error, reset parser */
+        ul_parser_zerocopy_init(parser);
+        parser->error_count++;
+        return -1;
     }
 
     switch (parser->state)
@@ -414,14 +427,26 @@ void ul_mempool_free(ul_mempool_t *pool, void *ptr)
         return; // Invalid index
     }
 
-    // Mark as free
+    /* Bug-6 FIX: No double-free guard existed. A second call with the same pointer
+       set the free-bit again (idempotent on free_mask) but also decremented
+       current_usage and incremented free_count a second time, corrupting statistics
+       and potentially triggering false "pool full" behaviour.
+       Detect double-free by checking whether the bit is already set and bail out. */
+    if (pool->free_mask & (1U << index))
+    {
+        /* Double-free: buffer already in the free pool — silently ignore to match
+           the defensive style of the rest of the codebase. */
+        return;
+    }
+
+    /* Mark as free */
     pool->free_mask |= (1U << index);
 
-    // Zero the released buffer: prevents decrypted plaintext / key material
-    // from persisting in memory and being readable via a later allocation.
+    /* Zero the released buffer: prevents decrypted plaintext / key material
+       from persisting in memory and being readable via a later allocation. */
     memset(pool->buffers[index], 0, UL_MEMPOOL_BUFFER_SIZE);
 
-    // Update statistics
+    /* Update statistics */
     pool->free_count++;
     if (pool->current_usage > 0)
     {
@@ -505,8 +530,7 @@ const ul_crypto_caps_t *ul_crypto_get_caps(void)
 /* --- Fast Combined API --- */
 
 int ul_pack_fast(ul_mempool_t *pool, const ul_header_t *h, const uint8_t *payload,
-                 const uint8_t *key_32b, ul_nonce_state_t *nonce_state,
-                 ul_crypto_ctx_t *crypto_ctx, uint8_t **buffer)
+                 ul_session_t *session, ul_crypto_ctx_t *crypto_ctx, uint8_t **buffer)
 {
     if (!pool || !h || !payload || !buffer)
     {
@@ -522,20 +546,15 @@ int ul_pack_fast(ul_mempool_t *pool, const ul_header_t *h, const uint8_t *payloa
 
     int packed_len;
 
-    if (key_32b && crypto_ctx)
+    if (session && crypto_ctx)
     {
-        // Use cached crypto context + selective encryption
-        packed_len = uavlink_pack_cached(buf, h, payload, key_32b, nonce_state, crypto_ctx);
-    }
-    else if (key_32b)
-    {
-        // Use selective encryption
-        packed_len = uavlink_pack_selective(buf, h, payload, key_32b, nonce_state);
+        /* Session + crypto cache: cached selective encryption */
+        packed_len = uavlink_pack_cached(buf, h, payload, session, crypto_ctx);
     }
     else
     {
-        // No encryption
-        packed_len = uavlink_pack(buf, h, payload, NULL);
+        /* session=NULL = transmit unencrypted; session non-NULL without cache = selective encrypt */
+        packed_len = uavlink_pack_with_nonce(buf, h, payload, session);
     }
 
     if (packed_len < 0)
@@ -632,5 +651,11 @@ int ul_check_replay_window(ul_parser_zerocopy_t *p, uint16_t seq)
         p->last_seq = seq;
         p->replay_window = 1UL;
     }
-    return 0; // Success
+    /* Bug-9 FIX: ul_check_replay_window() never incremented rx_count on success.
+       Callers who use this function instead of ul_parse_char_zerocopy() (e.g. after
+       out-of-band MAC verification) saw ul_get_link_quality() permanently return 0%
+       because rx_count remained 0 while error_count grew normally.
+       Increment rx_count here so link quality statistics remain consistent. */
+    p->rx_count++;
+    return 0; /* Success — packet accepted into replay window */
 }

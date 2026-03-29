@@ -80,9 +80,10 @@ static void secure_random(uint8_t *buf, size_t len)
 }
 
 // ECDH Session Key State
-static uint8_t session_key[32] = {0};
+static ul_session_t g_session;           /* Session bundling key + nonce state */
+static bool g_session_ready = false;     /* true once ul_session_init() has run */
 static uint8_t private_key[32] = {0};
-static uint8_t public_key[32] = {0};
+static uint8_t public_key[32]  = {0};
 
 // Identity Key State
 static uint8_t gcs_id_seed[32] = {0};
@@ -130,20 +131,24 @@ static const char *get_ack_result(uint8_t result)
 }
 
 // --- Nonce Persistence (NVM) Helpers ---
-static void save_nonce_state(const ul_nonce_state_t *state, const char *filename)
+static void save_nonce_state(const ul_session_t *s, const char *filename)
 {
+    if (!s || !s->initialized)
+        return;
     FILE *f = fopen(filename, "wb");
     if (f)
     {
-        uint32_t current_counter = ul_nonce_get_counter(state);
+        uint32_t current_counter = ul_nonce_get_counter(&s->nonce_state);
         fwrite(&current_counter, sizeof(uint32_t), 1, f);
         fclose(f);
     }
 }
 
-static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
+static void load_nonce_counter(ul_session_t *s, const char *filename)
 {
-    ul_nonce_init(state);
+    /* Must be called AFTER ul_session_init() has been called on s */
+    if (!s || !s->initialized)
+        return;
     FILE *f = fopen(filename, "rb");
     if (f)
     {
@@ -152,7 +157,7 @@ static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
         {
             // Jump by 10000 to prevent reuse if power was lost before a save
             saved_counter += 10000;
-            ul_nonce_set_counter(state, saved_counter);
+            ul_nonce_set_counter(&s->nonce_state, saved_counter);
             printf("NVM: Loaded nonce counter %u from %s (with safety jump)\n", saved_counter, filename);
         }
         fclose(f);
@@ -163,7 +168,7 @@ static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
     }
 
     // Save immediately so the jumped value is committed to disk
-    save_nonce_state(state, filename);
+    save_nonce_state(s, filename);
 }
 
 static void print_menu(void)
@@ -182,12 +187,12 @@ static void print_menu(void)
 // Send a command packet to the UAV
 static int send_command_packet(int sock, struct sockaddr_in *dest,
                                const ul_header_t *header, const uint8_t *payload,
-                               ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                               ul_mempool_t *pool, ul_session_t *session,
                                ul_crypto_ctx_t *crypto_ctx)
 {
     uint8_t *packet_buf = NULL;
-    int packet_len = ul_pack_fast(pool, header, payload, session_key,
-                                  nonce_state, crypto_ctx, &packet_buf);
+    int packet_len = ul_pack_fast(pool, header, payload, session,
+                                  crypto_ctx, &packet_buf);
 
     if (packet_len > 0 && packet_buf)
     {
@@ -202,7 +207,7 @@ static int send_command_packet(int sock, struct sockaddr_in *dest,
 // Send a generic command (arm, disarm, takeoff, land, etc.)
 static void send_cmd(int sock, struct sockaddr_in *dest,
                      uint16_t cmd_id, uint16_t param1,
-                     ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                     ul_mempool_t *pool, ul_session_t *session,
                      ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
     ul_command_t cmd = {0};
@@ -223,7 +228,7 @@ static void send_cmd(int sock, struct sockaddr_in *dest,
     header.target_sys_id = 1; // UAV
     header.msg_id = UL_MSG_CMD;
 
-    int sent = send_command_packet(sock, dest, &header, payload, pool, nonce_state, crypto_ctx);
+    int sent = send_command_packet(sock, dest, &header, payload, pool, session, crypto_ctx);
     if (sent > 0)
         printf("Sent command 0x%04X (%d bytes)\n", cmd_id, sent);
 }
@@ -246,7 +251,7 @@ typedef struct
 
 static void send_mode_change(int sock, struct sockaddr_in *dest,
                              uint8_t mode,
-                             ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                             ul_mempool_t *pool, ul_session_t *session,
                              ul_crypto_ctx_t *crypto_ctx, uint16_t *seq);
 
 static const auto_step_t soak_steps[] = {
@@ -264,7 +269,7 @@ static const auto_step_t soak_steps[] = {
 
 static void run_auto_step(int sock, struct sockaddr_in *dest,
                           const auto_step_t *step,
-                          ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                          ul_mempool_t *pool, ul_session_t *session,
                           ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
     if (!step)
@@ -272,18 +277,18 @@ static void run_auto_step(int sock, struct sockaddr_in *dest,
 
     if (step->type == AUTO_STEP_MODE)
     {
-        send_mode_change(sock, dest, step->mode, pool, nonce_state, crypto_ctx, seq);
+        send_mode_change(sock, dest, step->mode, pool, session, crypto_ctx, seq);
     }
     else
     {
-        send_cmd(sock, dest, step->cmd_id, step->param1, pool, nonce_state, crypto_ctx, seq);
+        send_cmd(sock, dest, step->cmd_id, step->param1, pool, session, crypto_ctx, seq);
     }
 }
 
 // Send a mode change
 static void send_mode_change(int sock, struct sockaddr_in *dest,
                              uint8_t mode,
-                             ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                             ul_mempool_t *pool, ul_session_t *session,
                              ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
     ul_mode_change_t mc = {0};
@@ -303,7 +308,7 @@ static void send_mode_change(int sock, struct sockaddr_in *dest,
     header.target_sys_id = 1;
     header.msg_id = UL_MSG_MODE_CHANGE;
 
-    int sent = send_command_packet(sock, dest, &header, payload, pool, nonce_state, crypto_ctx);
+    int sent = send_command_packet(sock, dest, &header, payload, pool, session, crypto_ctx);
     if (sent > 0)
         printf("Sent mode change -> %s (%d bytes)\n", get_mode_name(mode), sent);
 }
@@ -311,7 +316,7 @@ static void send_mode_change(int sock, struct sockaddr_in *dest,
 // Send a mission waypoint
 static void send_waypoint(int sock, struct sockaddr_in *dest,
                           uint16_t wp_seq,
-                          ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                          ul_mempool_t *pool, ul_session_t *session,
                           ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
     ul_mission_item_t item = {0};
@@ -337,7 +342,7 @@ static void send_waypoint(int sock, struct sockaddr_in *dest,
     header.target_sys_id = 1;
     header.msg_id = UL_MSG_MISSION_ITEM;
 
-    int sent = send_command_packet(sock, dest, &header, payload, pool, nonce_state, crypto_ctx);
+    int sent = send_command_packet(sock, dest, &header, payload, pool, session, crypto_ctx);
     if (sent > 0)
         printf("Sent waypoint #%u: lat=%d lon=%d alt=%dmm (%d bytes)\n",
                wp_seq, item.lat, item.lon, item.alt, sent);
@@ -368,7 +373,7 @@ static int get_key(void)
 
 // Send a fragmented mission plan (5 waypoints packed into one large payload)
 static void send_mission_fragmented(int sock, struct sockaddr_in *dest,
-                                    ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                                    ul_mempool_t *pool, ul_session_t *session,
                                     ul_crypto_ctx_t *crypto_ctx, uint16_t *seq)
 {
     // Pack 5 waypoints into a single large payload
@@ -433,7 +438,7 @@ static void send_mission_fragmented(int sock, struct sockaddr_in *dest,
         frag_header.msg_id = UL_MSG_MISSION_ITEM;
 
         int sent = send_command_packet(sock, dest, &frag_header,
-                                       big_payload + frag_offset, pool, nonce_state, crypto_ctx);
+                                       big_payload + frag_offset, pool, session, crypto_ctx);
         if (sent > 0)
         {
             printf("  Fragment %d/%d: %d payload bytes, %d wire bytes\n",
@@ -525,8 +530,9 @@ int main(int argc, char *argv[])
     ul_mempool_t pool;
     ul_mempool_init(&pool);
 
-    ul_nonce_state_t nonce_state;
-    load_nonce_state(&nonce_state, "keys/gcs_nonce.dat");
+    /* Session will be initialised after ECDH completes.
+       The NVM nonce counter will be applied to it at that point. */
+    memset(&g_session, 0, sizeof(g_session));
 
     ul_crypto_ctx_t crypto_ctx;
     ul_crypto_ctx_init(&crypto_ctx);
@@ -602,7 +608,7 @@ int main(int argc, char *argv[])
     ul_parser_zerocopy_t parser;
     memset(&parser, 0, sizeof(parser));
     ul_parser_zerocopy_init(&parser);
-    parser.key_32b = session_key; // Provide session key for transparent decryption
+    parser.key_32b = g_session_ready ? g_session.key : NULL; // Will be updated when session is established
 
     uint32_t packets_received = 0;
     uint32_t parse_errors = 0;
@@ -674,20 +680,11 @@ int main(int argc, char *argv[])
                 header.target_sys_id = 1; // UAV
                 header.msg_id = UL_MSG_KEY_EXCHANGE;
 
-                send_command_packet(cmd_sock, &uav_cmd_addr, &header, payload, &pool, &nonce_state, &crypto_ctx);
+                send_command_packet(cmd_sock, &uav_cmd_addr, &header, payload, &pool,
+                                    g_session_ready ? &g_session : NULL, &crypto_ctx);
 
-                // If we already have session_key (from receiving UAV KEY_EXCHANGE), mark ESTABLISHED
-                bool has_key = false;
-                for (int i = 0; i < 32; i++)
-                {
-                    if (session_key[i] != 0)
-                    {
-                        has_key = true;
-                        break;
-                    }
-                }
-
-                if (has_key && ecdh_state == UL_ECDH_RECEIVED_KEY)
+                // If we already have a session (from receiving UAV KEY_EXCHANGE), mark ESTABLISHED
+                if (g_session_ready && ecdh_state == UL_ECDH_RECEIVED_KEY)
                 {
                     // We received their key earlier, now we sent ours - ESTABLISHED
                     ecdh_state = UL_ECDH_ESTABLISHED;
@@ -735,7 +732,7 @@ int main(int argc, char *argv[])
                 const auto_step_t *step = &soak_steps[auto_step_index];
                 auto_iteration++;
                 printf("\n[AUTO] Step %u: %s\n", (unsigned int)auto_iteration, step->name);
-                run_auto_step(cmd_sock, &uav_cmd_addr, step, &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                run_auto_step(cmd_sock, &uav_cmd_addr, step, &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 printf(">>> ");
                 fflush(stdout);
 
@@ -759,32 +756,32 @@ int main(int argc, char *argv[])
             case '1':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_ARM, 0,
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '2':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_DISARM, 0,
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '3':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_TAKEOFF, 1000, // 10m
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '4':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_LAND, 0,
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '5':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_RTL, 0,
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '6':
                 printf("\n");
                 send_cmd(cmd_sock, &uav_cmd_addr, UL_CMD_EMERGENCY, 0,
-                         &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                         &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             case '7':
             {
@@ -796,7 +793,7 @@ int main(int argc, char *argv[])
                 {
                     printf("%c\n", mode_key);
                     send_mode_change(cmd_sock, &uav_cmd_addr, mode_key - '0',
-                                     &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                                     &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 }
                 else
                 {
@@ -808,14 +805,14 @@ int main(int argc, char *argv[])
             {
                 printf("\n");
                 send_waypoint(cmd_sock, &uav_cmd_addr, next_wp_seq++,
-                              &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                              &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             }
             case '9':
             {
                 printf("\n--- Uploading Fragmented Mission (5 waypoints) ---\n");
                 send_mission_fragmented(cmd_sock, &uav_cmd_addr,
-                                        &pool, &nonce_state, &crypto_ctx, &cmd_sequence);
+                                        &pool, &g_session, &crypto_ctx, &cmd_sequence);
                 break;
             }
             case '0':
@@ -894,11 +891,26 @@ int main(int argc, char *argv[])
                     // This handles crossed-in-flight KEY_EXCHANGE packets and ensures both sides get the key
                     uint8_t raw_shared[32];
                     crypto_x25519(raw_shared, private_key, rx_kx.public_key);
-                    crypto_blake2b(session_key, 32, raw_shared, 32);
+                    uint8_t derived_key[32];
+                    crypto_blake2b(derived_key, 32, raw_shared, 32);
+                    crypto_wipe(raw_shared, 32);
 
-                    printf("[DEBUG] GCS session_key: %02X%02X%02X%02X%02X%02X%02X%02X\n",
-                           session_key[0], session_key[1], session_key[2], session_key[3],
-                           session_key[4], session_key[5], session_key[6], session_key[7]);
+                    if (ul_session_init(&g_session, derived_key) != 0)
+                    {
+                        printf("  >>> ECDH FATAL: session init failed (CSPRNG error)\n");
+                        crypto_wipe(derived_key, 32);
+                        break;
+                    }
+                    crypto_wipe(derived_key, 32); /* Remove key from stack */
+
+                    /* Apply saved NVM counter (prevents reuse on reboot) */
+                    load_nonce_counter(&g_session, "keys/gcs_nonce.dat");
+                    g_session_ready = true;
+
+                    /* Update the parser's key pointer */
+                    parser.key_32b = g_session.key;
+
+                    printf("[DEBUG] GCS session initialized securely\n");
                     printf("[TM] HANDSHAKE:RECEIVED_KEY\n");
                     fflush(stdout);
 
@@ -935,8 +947,8 @@ int main(int argc, char *argv[])
                     kx_hdr.msg_id = UL_MSG_KEY_EXCHANGE;
 
                     uint8_t *kx_buf = NULL;
-                    int kx_pkt_len = ul_pack_fast(&pool, &kx_hdr, kx_payload, session_key,
-                                                  &nonce_state, &crypto_ctx, &kx_buf);
+                    int kx_pkt_len = ul_pack_fast(&pool, &kx_hdr, kx_payload,
+                                                  g_session_ready ? &g_session : NULL, &crypto_ctx, &kx_buf);
                     if (kx_pkt_len > 0 && kx_buf)
                     {
                         sendto(cmd_sock, (char *)kx_buf, kx_pkt_len, 0,
@@ -951,10 +963,14 @@ int main(int argc, char *argv[])
                     printf("  >>> ECDH: Session ESTABLISHED! (received UAV key, sent GCS key)\n>>> ");
                     printf("[TM] HANDSHAKE:ESTABLISHED\n");
                     printf("[TM] SESSION_KEY:%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
-                           session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5], session_key[6], session_key[7],
-                           session_key[8], session_key[9], session_key[10], session_key[11], session_key[12], session_key[13], session_key[14], session_key[15],
-                           session_key[16], session_key[17], session_key[18], session_key[19], session_key[20], session_key[21], session_key[22], session_key[23],
-                           session_key[24], session_key[25], session_key[26], session_key[27], session_key[28], session_key[29], session_key[30], session_key[31]);
+                           g_session.key[0],  g_session.key[1],  g_session.key[2],  g_session.key[3],
+                           g_session.key[4],  g_session.key[5],  g_session.key[6],  g_session.key[7],
+                           g_session.key[8],  g_session.key[9],  g_session.key[10], g_session.key[11],
+                           g_session.key[12], g_session.key[13], g_session.key[14], g_session.key[15],
+                           g_session.key[16], g_session.key[17], g_session.key[18], g_session.key[19],
+                           g_session.key[20], g_session.key[21], g_session.key[22], g_session.key[23],
+                           g_session.key[24], g_session.key[25], g_session.key[26], g_session.key[27],
+                           g_session.key[28], g_session.key[29], g_session.key[30], g_session.key[31]);
                     printf("[UAVLink] Sic Parvis Magna.\n>>> ");
                     fflush(stdout);
 
@@ -978,8 +994,8 @@ int main(int argc, char *argv[])
                     ack_hdr.msg_id = UL_MSG_KEY_EXCHANGE_ACK;
 
                     uint8_t *ack_buf = NULL;
-                    int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload, session_key,
-                                                   &nonce_state, &crypto_ctx, &ack_buf);
+                    int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload,
+                                                   g_session_ready ? &g_session : NULL, &crypto_ctx, &ack_buf);
                     if (ack_pkt_len > 0 && ack_buf)
                     {
                         sendto(cmd_sock, (char *)ack_buf, ack_pkt_len, 0,
@@ -997,20 +1013,9 @@ int main(int argc, char *argv[])
                     // Mark as ESTABLISHED if we have session_key computed
                     if (rx_ack.seq_num == ecdh_seq_num && ecdh_state >= UL_ECDH_SENT_KEY && ecdh_state != UL_ECDH_ESTABLISHED)
                     {
-                        // Check if session_key is valid (not all zeros)
-                        bool has_key = false;
-                        for (int i = 0; i < 32; i++)
+                        if (g_session_ready)
                         {
-                            if (session_key[i] != 0)
-                            {
-                                has_key = true;
-                                break;
-                            }
-                        }
-
-                        if (has_key)
-                        {
-                            // We have session_key, mark ESTABLISHED
+                            // Session already established
                             ecdh_state = UL_ECDH_ESTABLISHED;
                             ecdh_retry_count = 0;
                             printf("\n  >>> ECDH: Received ACK for seq=%u, session ESTABLISHED!\n>>> ", ecdh_seq_num);
@@ -1052,7 +1057,7 @@ int main(int argc, char *argv[])
                         fflush(stdout);
 
                         // Periodically save the nonce to NVM to keep the jump safe
-                        save_nonce_state(&nonce_state, "gcs_nonce.dat");
+                        save_nonce_state(&g_session, "gcs_nonce.dat");
                     }
                     break;
                 }
@@ -1127,7 +1132,7 @@ int main(int argc, char *argv[])
 #endif
 
     // Final save on clean exit
-    save_nonce_state(&nonce_state, "gcs_nonce.dat");
+    save_nonce_state(&g_session, "gcs_nonce.dat");
 
     return 0;
 }

@@ -217,8 +217,7 @@ const ul_crypto_caps_t *ul_crypto_get_caps(void);
  * @return Number of bytes packed, or negative error code
  */
 int ul_pack_fast(ul_mempool_t *pool, const ul_header_t *h, const uint8_t *payload,
-                 const uint8_t *key_32b, ul_nonce_state_t *nonce_state,
-                 ul_crypto_ctx_t *crypto_ctx, uint8_t **buffer);
+                 ul_session_t *session, ul_crypto_ctx_t *crypto_ctx, uint8_t **buffer);
 
 /**
  * Fast parse combining zero-copy + memory pool:

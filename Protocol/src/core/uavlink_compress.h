@@ -24,28 +24,42 @@
  * LZ4 COMPRESSION
  * ============================================================================= */
 
+/* Bug-10 FIX: ul_lz4_ctx_t was a dead abstraction. The struct was declared and
+   accepted by ul_lz4_init(), but ul_lz4_compress() never took a ctx argument,
+   making the context entirely unused. Callers who allocated and initialised a
+   context got no benefit, and the type falsely implied compression was
+   stateful/streaming when it is in fact fully stateless.
+
+   Both the struct and ul_lz4_init() are kept below for ABI/source compatibility
+   with existing callers, but are marked deprecated. New code should not use them. */
+
 /**
- * LZ4 compression context for streaming compression
+ * @deprecated Dead abstraction \u2014 ul_lz4_compress() is stateless and does not use
+ * this context. All fields are ignored by the implementation. Kept for source-level
+ * compatibility only; will be removed in a future version.
  */
 typedef struct
 {
-    uint32_t history_pos; // history buffer removed (was unused 64KB)
-    bool initialized;
+    uint32_t history_pos; /* unused \u2014 history buffer was removed */
+    bool initialized;     /* unused \u2014 compression is stateless */
 } ul_lz4_ctx_t;
 
 /**
- * Initialize LZ4 compression context
- * @param ctx LZ4 context
+ * @deprecated No-op. ul_lz4_compress() requires no initialisation.
+ * This function exists only for source-level compatibility with older callers.
+ * @param ctx Ignored.
  */
 void ul_lz4_init(ul_lz4_ctx_t *ctx);
 
 /**
- * Compress data using fast LZ4 algorithm
- * Optimized for speed over compression ratio
+ * Compress data using fast LZ4 algorithm.
  *
- * @param input Input data
- * @param input_len Input length
- * @param output Output buffer (must be at least input_len + (input_len/255) + 16 bytes)
+ * NOTE: This function is STATELESS \u2014 no context is required or used.
+ *       The ul_lz4_ctx_t type and ul_lz4_init() are deprecated no-ops.
+ *
+ * @param input      Input data
+ * @param input_len  Input length
+ * @param output     Output buffer (must be >= input_len + (input_len/255) + 16 bytes)
  * @param max_output Maximum output size
  * @return Compressed size, or negative on error
  */

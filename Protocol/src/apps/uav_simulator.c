@@ -83,9 +83,10 @@ static void secure_random(uint8_t *buf, size_t len)
 }
 
 // ECDH Session Key State
-static uint8_t session_key[32] = {0};
+static ul_session_t g_session;           /* Session bundling key + nonce state */
+static bool g_session_ready = false;     /* true once ul_session_init() has run */
 static uint8_t private_key[32] = {0};
-static uint8_t public_key[32] = {0};
+static uint8_t public_key[32]  = {0};
 
 // Identity Key State
 static uint8_t uav_id_seed[32] = {0};
@@ -113,20 +114,26 @@ static const char *get_mode_name(uint8_t mode)
 }
 
 // --- Nonce Persistence (NVM) Helpers ---
-static void save_nonce_state(const ul_nonce_state_t *state, const char *filename)
+// These helpers persist the nonce counter so that if the UAV loses power before
+// saving, the counter restarts 10000 ahead — preventing reuse on reboot.
+static void save_nonce_state(const ul_session_t *s, const char *filename)
 {
+    if (!s || !s->initialized)
+        return;
     FILE *f = fopen(filename, "wb");
     if (f)
     {
-        uint32_t current_counter = ul_nonce_get_counter(state);
+        uint32_t current_counter = ul_nonce_get_counter(&s->nonce_state);
         fwrite(&current_counter, sizeof(uint32_t), 1, f);
         fclose(f);
     }
 }
 
-static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
+static void load_nonce_counter(ul_session_t *s, const char *filename)
 {
-    ul_nonce_init(state);
+    /* Must be called AFTER ul_session_init() has been called on s */
+    if (!s || !s->initialized)
+        return;
     FILE *f = fopen(filename, "rb");
     if (f)
     {
@@ -135,7 +142,7 @@ static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
         {
             // Jump by 10000 to prevent reuse if power was lost before a save
             saved_counter += 10000;
-            ul_nonce_set_counter(state, saved_counter);
+            ul_nonce_set_counter(&s->nonce_state, saved_counter);
             printf("NVM: Loaded nonce counter %u from %s (with safety jump)\n", saved_counter, filename);
         }
         fclose(f);
@@ -144,9 +151,8 @@ static void load_nonce_state(ul_nonce_state_t *state, const char *filename)
     {
         printf("NVM: No saved nonce found (%s), starting fresh.\n", filename);
     }
-
     // Save immediately so the jumped value is committed to disk
-    save_nonce_state(state, filename);
+    save_nonce_state(s, filename);
 }
 
 // UAV State
@@ -271,7 +277,7 @@ static ul_command_ack_t process_command(uav_state_t *state, const ul_command_t *
 // Send an ACK packet back to GCS
 static void send_ack(int sock, struct sockaddr_in *dest,
                      const ul_command_ack_t *ack, uav_state_t *state,
-                     ul_mempool_t *pool, ul_nonce_state_t *nonce_state,
+                     ul_mempool_t *pool, ul_session_t *session,
                      ul_crypto_ctx_t *crypto_ctx)
 {
     uint8_t payload[32];
@@ -289,8 +295,8 @@ static void send_ack(int sock, struct sockaddr_in *dest,
     header.msg_id = UL_MSG_CMD_ACK;
 
     uint8_t *packet_buf = NULL;
-    int packet_len = ul_pack_fast(pool, &header, payload, session_key,
-                                  nonce_state, crypto_ctx, &packet_buf);
+    int packet_len = ul_pack_fast(pool, &header, payload, session,
+                                  crypto_ctx, &packet_buf);
 
     if (packet_len > 0 && packet_buf)
     {
@@ -358,8 +364,9 @@ int main(int argc, char *argv[])
     ul_mempool_t pool;
     ul_mempool_init(&pool);
 
-    ul_nonce_state_t nonce_state;
-    load_nonce_state(&nonce_state, "keys/uav_nonce.dat");
+    /* Session will be initialised after ECDH completes.
+       The NVM nonce counter will be applied to it at that point. */
+    memset(&g_session, 0, sizeof(g_session));
 
     ul_crypto_ctx_t crypto_ctx;
     ul_crypto_ctx_init(&crypto_ctx);
@@ -445,7 +452,7 @@ int main(int argc, char *argv[])
     ul_parser_zerocopy_t cmd_parser;
     memset(&cmd_parser, 0, sizeof(cmd_parser));
     ul_parser_zerocopy_init(&cmd_parser);
-    cmd_parser.key_32b = session_key; // Provide session key for transparent decryption
+    cmd_parser.key_32b = g_session_ready ? g_session.key : NULL; // Will be updated when session is established
 
     uint32_t packets_sent = 0;
     uint32_t commands_received = 0;
@@ -546,12 +553,27 @@ int main(int argc, char *argv[])
                         // This handles crossed-in-flight KEY_EXCHANGE packets and ensures both sides get the key
                         uint8_t raw_shared[32];
                         crypto_x25519(raw_shared, private_key, rx_kx.public_key);
-                        crypto_blake2b(session_key, 32, raw_shared, 32);
 
-                        printf("[DEBUG] UAV session_key[0-7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                               session_key[0], session_key[1], session_key[2], session_key[3],
-                               session_key[4], session_key[5], session_key[6], session_key[7]);
-                        fflush(stdout);
+                        /* Derive the session key then immediately initialise the
+                           session object — key and nonce are now inseparable. */
+                        uint8_t derived_key[32];
+                        crypto_blake2b(derived_key, 32, raw_shared, 32);
+                        crypto_wipe(raw_shared, 32);
+
+                        if (ul_session_init(&g_session, derived_key) != 0)
+                        {
+                            printf(RED "  >>> ECDH FATAL: session init failed (CSPRNG error)\n" RESET);
+                            crypto_wipe(derived_key, 32);
+                            break;
+                        }
+                        crypto_wipe(derived_key, 32); /* Remove key from stack */
+
+                        /* Apply saved NVM counter (prevents reuse on reboot) */
+                        load_nonce_counter(&g_session, "keys/uav_nonce.dat");
+                        g_session_ready = true;
+
+                        /* Update the parser's key pointer */
+                        cmd_parser.key_32b = g_session.key;
 
                         ecdh_peer_seq = rx_kx.seq_num;
 
@@ -586,8 +608,9 @@ int main(int argc, char *argv[])
                         kx_hdr.msg_id = UL_MSG_KEY_EXCHANGE;
 
                         uint8_t *kx_buf = NULL;
-                        int kx_pkt_len = ul_pack_fast(&pool, &kx_hdr, kx_payload, session_key,
-                                                      &nonce_state, &crypto_ctx, &kx_buf);
+                        int kx_pkt_len = ul_pack_fast(&pool, &kx_hdr, kx_payload,
+                                                      g_session_ready ? &g_session : NULL,
+                                                      &crypto_ctx, &kx_buf);
                         if (kx_pkt_len > 0 && kx_buf)
                         {
                             sendto(telem_sock, (char *)kx_buf, kx_pkt_len, 0,
@@ -603,10 +626,14 @@ int main(int argc, char *argv[])
                         printf(GREEN "  >>> ECDH: Session ESTABLISHED! (received GCS key, sent UAV key)\n" RESET);
                         printf("[TM] HANDSHAKE:ESTABLISHED\n");
                         printf("[TM] SESSION_KEY:%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\n",
-                               session_key[0], session_key[1], session_key[2], session_key[3], session_key[4], session_key[5], session_key[6], session_key[7],
-                               session_key[8], session_key[9], session_key[10], session_key[11], session_key[12], session_key[13], session_key[14], session_key[15],
-                               session_key[16], session_key[17], session_key[18], session_key[19], session_key[20], session_key[21], session_key[22], session_key[23],
-                               session_key[24], session_key[25], session_key[26], session_key[27], session_key[28], session_key[29], session_key[30], session_key[31]);
+                               g_session.key[0],  g_session.key[1],  g_session.key[2],  g_session.key[3],
+                               g_session.key[4],  g_session.key[5],  g_session.key[6],  g_session.key[7],
+                               g_session.key[8],  g_session.key[9],  g_session.key[10], g_session.key[11],
+                               g_session.key[12], g_session.key[13], g_session.key[14], g_session.key[15],
+                               g_session.key[16], g_session.key[17], g_session.key[18], g_session.key[19],
+                               g_session.key[20], g_session.key[21], g_session.key[22], g_session.key[23],
+                               g_session.key[24], g_session.key[25], g_session.key[26], g_session.key[27],
+                               g_session.key[28], g_session.key[29], g_session.key[30], g_session.key[31]);
                         printf(BLUE "[UAVLink] Uniform, Alpha, Victor. Link is hot !!" RESET "\n");
                         fflush(stdout);
 
@@ -630,8 +657,9 @@ int main(int argc, char *argv[])
                         ack_hdr.msg_id = UL_MSG_KEY_EXCHANGE_ACK;
 
                         uint8_t *ack_buf = NULL;
-                        int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload, session_key,
-                                                       &nonce_state, &crypto_ctx, &ack_buf);
+                        int ack_pkt_len = ul_pack_fast(&pool, &ack_hdr, ack_payload,
+                                                       g_session_ready ? &g_session : NULL,
+                                                       &crypto_ctx, &ack_buf);
                         if (ack_pkt_len > 0 && ack_buf)
                         {
                             sendto(telem_sock, (char *)ack_buf, ack_pkt_len, 0,
@@ -649,20 +677,9 @@ int main(int argc, char *argv[])
                         // Mark as ESTABLISHED if we have session_key computed
                         if (rx_ack.seq_num == ecdh_seq_num && ecdh_state >= UL_ECDH_SENT_KEY && ecdh_state != UL_ECDH_ESTABLISHED)
                         {
-                            // Check if session_key is valid (not all zeros)
-                            bool has_key = false;
-                            for (int i = 0; i < 32; i++)
+                            if (g_session_ready)
                             {
-                                if (session_key[i] != 0)
-                                {
-                                    has_key = true;
-                                    break;
-                                }
-                            }
-
-                            if (has_key)
-                            {
-                                // We have session_key, mark ESTABLISHED
+                                // Session already established
                                 ecdh_state = UL_ECDH_ESTABLISHED;
                                 ecdh_retry_count = 0;
                                 printf("  >>> ECDH: Received ACK for seq=%u, session ESTABLISHED!\n", ecdh_seq_num);
@@ -696,7 +713,7 @@ int main(int argc, char *argv[])
 
                         ul_command_ack_t ack = process_command(&state, &cmd);
                         send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
-                                 &pool, &nonce_state, &crypto_ctx);
+                                 &pool, &g_session, &crypto_ctx);
                         break;
                     }
                     case UL_MSG_MODE_CHANGE:
@@ -715,7 +732,7 @@ int main(int argc, char *argv[])
                         ack.command_id = UL_MSG_MODE_CHANGE;
                         ack.result = UL_ACK_OK;
                         send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
-                                 &pool, &nonce_state, &crypto_ctx);
+                                 &pool, &g_session, &crypto_ctx);
                         printf("  >>> Mode set to %s\n", get_mode_name(state.flight_mode));
                         break;
                     }
@@ -765,8 +782,8 @@ int main(int argc, char *argv[])
                                 ul_command_ack_t ack = {0};
                                 ack.command_id = UL_MSG_MISSION_ITEM;
                                 ack.result = UL_ACK_OK;
-                                send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
-                                         &pool, &nonce_state, &crypto_ctx);
+                                 send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
+                                          &pool, &g_session, &crypto_ctx);
                                 printf("  >>> Mission stored! %u waypoints total\n",
                                        state.mission_count);
                             }
@@ -797,8 +814,8 @@ int main(int argc, char *argv[])
                             ul_command_ack_t ack = {0};
                             ack.command_id = UL_MSG_MISSION_ITEM;
                             ack.result = UL_ACK_OK;
-                            send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
-                                     &pool, &nonce_state, &crypto_ctx);
+                                 send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
+                                          &pool, &g_session, &crypto_ctx);
                             printf("  >>> Waypoint %u stored (%u total)\n",
                                    item.seq, state.mission_count);
                         }
@@ -889,8 +906,9 @@ int main(int argc, char *argv[])
                 header.msg_id = UL_MSG_KEY_EXCHANGE;
 
                 uint8_t *packet_buf = NULL;
-                int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                              &nonce_state, &crypto_ctx, &packet_buf);
+                int packet_len = ul_pack_fast(&pool, &header, payload,
+                                              g_session_ready ? &g_session : NULL,
+                                              &crypto_ctx, &packet_buf);
                 if (packet_len > 0 && packet_buf)
                 {
                     sendto(telem_sock, (char *)packet_buf, packet_len, 0,
@@ -936,8 +954,9 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_HEARTBEAT;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
+            int packet_len = ul_pack_fast(&pool, &header, payload,
+                                          g_session_ready ? &g_session : NULL,
+                                          &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
             {
@@ -968,8 +987,9 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_ATTITUDE;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
+            int packet_len = ul_pack_fast(&pool, &header, payload,
+                                          g_session_ready ? &g_session : NULL,
+                                          &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
             {
@@ -1003,8 +1023,9 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_GPS_RAW;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
-                                          &nonce_state, &crypto_ctx, &packet_buf);
+            int packet_len = ul_pack_fast(&pool, &header, payload,
+                                          g_session_ready ? &g_session : NULL,
+                                          &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
             {
@@ -1024,8 +1045,8 @@ int main(int argc, char *argv[])
                    packets_sent, commands_received,
                    state.voltage / 1000.0f);
 
-            // Periodically save the nonce to NVM to keep the jump safe
-            save_nonce_state(&nonce_state, "keys/uav_nonce.dat");
+            // Periodically save the nonce counter to NVM
+            save_nonce_state(&g_session, "keys/uav_nonce.dat");
         }
 
         // --- PyQt5 Telemetry Output ---
@@ -1054,7 +1075,7 @@ int main(int argc, char *argv[])
 #endif
 
     // Final save on clean exit
-    save_nonce_state(&nonce_state, "uav_nonce.dat");
+    save_nonce_state(&g_session, "uav_nonce.dat");
 
     return 0;
 }

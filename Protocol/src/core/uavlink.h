@@ -171,6 +171,36 @@ typedef struct
     uint8_t reserved[3]; // Padding for alignment
 } ul_nonce_state_t;
 
+/**
+ * Cryptographic session — bundles key and nonce state together so they can
+ * never be accidentally separated. Providing a key without a properly seeded
+ * nonce state leads to nonce reuse, which destroys AEAD security.
+ *
+ * Always initialise with ul_session_init(). Never copy or memset this struct.
+ * Destroy with ul_session_destroy() before the session goes out of scope.
+ */
+typedef struct
+{
+    uint8_t          key[32];     /* 32-byte session key (ChaCha20-Poly1305) */
+    ul_nonce_state_t nonce_state; /* Nonce counter — managed exclusively by ul_nonce_generate() */
+    bool             initialized; /* true iff ul_session_init() has succeeded */
+} ul_session_t;
+
+/**
+ * Initialise a crypto session from a 32-byte key.
+ * Seeds the nonce counter from the platform CSPRNG.
+ * @param session  Output session (must not be NULL)
+ * @param key      32-byte session key
+ * @return 0 on success, -1 if CSPRNG fails or arguments are NULL
+ */
+int ul_session_init(ul_session_t *session, const uint8_t key[32]);
+
+/**
+ * Securely destroy a session — zeros key and nonce material via crypto_wipe().
+ * Call before freeing or leaving scope.
+ */
+void ul_session_destroy(ul_session_t *session);
+
 /* --- OPTIMIZATION: Crypto Context Caching --- */
 typedef struct
 {
@@ -372,9 +402,8 @@ void ul_parser_init(ul_parser_t *p);
 int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b);
 
 /* Pack a complete message into a byte buffer ready for wire transmission.
-   Returns the total packet length (header + payload + CRC).
-   If key is non-null, payload is encrypted. */
-int uavlink_pack(uint8_t *buf, const ul_header_t *h, const uint8_t *payload, const uint8_t *key_32b);
+   NOTE: uavlink_pack() is now INTERNAL — it has been removed from the public API.
+   Use uavlink_pack_with_nonce() with a properly initialised ul_session_t instead. */
 
 /* Serialize specific messages to a raw byte buffer */
 int ul_serialize_heartbeat(const ul_heartbeat_t *hb, uint8_t *payload_buf);
@@ -444,11 +473,12 @@ void ul_nonce_set_counter(ul_nonce_state_t *state, uint32_t counter);
    The nonce buffer must be at least 8 bytes. */
 void ul_nonce_generate(ul_nonce_state_t *state, uint8_t nonce[8]);
 
-/* Advanced: Pack with nonce state management.
-   Automatically generates and uses a secure nonce from the state.
+/* Advanced: Pack with session-managed nonce.
+   The session bundles key and nonce state — it is now STRUCTURALLY IMPOSSIBLE
+   to provide a key without a managed nonce. NULL session = unencrypted.
    Returns the total packet length (header + payload + CRC). */
 int uavlink_pack_with_nonce(uint8_t *buf, const ul_header_t *h, const uint8_t *payload,
-                            const uint8_t *key_32b, ul_nonce_state_t *nonce_state);
+                            ul_session_t *session);
 
 /* --- OPTIMIZATION API Functions --- */
 
@@ -456,24 +486,22 @@ int uavlink_pack_with_nonce(uint8_t *buf, const ul_header_t *h, const uint8_t *p
 void ul_crypto_ctx_init(ul_crypto_ctx_t *ctx);
 
 /* OPTIMIZATION: Pack with crypto context caching (30% faster for consecutive packets)
-   Reuses crypto context if same key as previous packet.
+   Reuses crypto context if same key as previous packet. NULL session = unencrypted.
    Returns the total packet length (header + payload + CRC). */
 int uavlink_pack_cached(uint8_t *buf, const ul_header_t *h, const uint8_t *payload,
-                        const uint8_t *key_32b, ul_nonce_state_t *nonce_state,
-                        ul_crypto_ctx_t *crypto_ctx);
+                        ul_session_t *session, ul_crypto_ctx_t *crypto_ctx);
 
-/* OPTIMIZATION: Pack with selective encryption based on message policy
-   Automatically applies encryption policy based on message ID.
+/* OPTIMIZATION: Pack with selective encryption based on message policy.
+   NULL session = unencrypted (policy ENCRYPT_ALWAYS with NULL session returns UL_ERR_NO_KEY).
    Returns the total packet length (header + payload + CRC). */
 int uavlink_pack_selective(uint8_t *buf, const ul_header_t *h, const uint8_t *payload,
-                           const uint8_t *key_32b, ul_nonce_state_t *nonce_state);
+                           ul_session_t *session);
 
 /* OPTIMIZATION: Pack multiple messages into a single batched packet (18% bandwidth reduction)
-   Aggregates multiple small messages into one packet.
+   NULL session = unencrypted.
    Returns the total packet length (header + payload + CRC). */
 int uavlink_pack_batch(uint8_t *buf, const ul_batch_t *batch,
-                       const uint8_t *key_32b, ul_nonce_state_t *nonce_state,
-                       uint8_t priority);
+                       ul_session_t *session, uint8_t priority);
 
 /* Deserialize a received batch payload into a ul_batch_t structure.
    @param payload     Decrypted/decrypted batch payload bytes
